@@ -4,12 +4,18 @@ import { useSearchParams } from 'next/navigation';
 import type { AudioVideoFacade, DefaultMeetingSession } from 'amazon-chime-sdk-js';
 import VideoTile from './VideoTile';
 import type { Report } from '@/lib/reports';
+import { botNumber, createToneListener, hueFor, makeBotMedia, sampleVideo, stripChanged, toneHz, type VideoSample } from '@/lib/botsignal';
 
 interface Tile { tileId: number; attendeeId: string; content: boolean; local: boolean }
 interface Person { name: string; volume: number; muted: boolean }
 interface Dev { deviceId: string; label: string }
 
 const SPEAKING_THRESHOLD = 0.1;
+const REPORT_EVERY_MS = 10_000; // keeps us inside free-tier request/command quotas
+const ADJ = ['Swift', 'Quiet', 'Brave', 'Lucky', 'Calm', 'Witty', 'Bold', 'Sunny'];
+const ANIMAL = ['Otter', 'Falcon', 'Panda', 'Fox', 'Heron', 'Lynx', 'Koala', 'Gecko'];
+const randomName = () => `${ADJ[Math.floor(Math.random() * ADJ.length)]} ${ANIMAL[Math.floor(Math.random() * ANIMAL.length)]}`;
+interface LogEvent { t: number; name: string; joined: boolean }
 // ExternalUserId is `${kind}-${name}-${id}`; show just the name.
 const pretty = (x: string) => x.replace(/^(human|bot)-/, '').replace(/-[0-9a-f]{8}$/, '');
 
@@ -17,7 +23,7 @@ export default function Room({ room }: { room: string }) {
   const sp = useSearchParams();
   const autoShare = sp.get('share') === '1';
   const [name, setName] = useState('');
-  const [code, setCode] = useState('');
+  const [code, setCode] = useState(sp.get('code') || '');
   const [me, setMe] = useState<{ name: string; bot: boolean } | null | undefined>(undefined);
   const [needCode, setNeedCode] = useState(false);
   const isBot = sp.get('bot') === '1' || !!me?.bot;
@@ -37,6 +43,7 @@ export default function Room({ room }: { room: string }) {
   const [bots, setBots] = useState<string[]>([]);
   const [botCount, setBotCount] = useState(3);
   const [botsEnabled, setBotsEnabled] = useState(false);
+  const [events, setEvents] = useState<LogEvent[]>([]);
   const sessionRef = useRef<DefaultMeetingSession | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [av, setAv] = useState<AudioVideoFacade | null>(null);
@@ -44,6 +51,11 @@ export default function Room({ room }: { room: string }) {
   const heardRef = useRef<Record<string, number>>({});
   const tileCountRef = useRef(0);
   const meNameRef = useRef('');
+  const lastSentRef = useRef(0);
+  const signalsRef = useRef<NonNullable<Report['signals']>>({ audio: {}, video: {} });
+  const prevStripRef = useRef<Record<string, VideoSample['strip']>>({});
+  const botMediaRef = useRef<ReturnType<typeof makeBotMedia> | null>(null);
+  const toneRef = useRef<ReturnType<typeof createToneListener> | null>(null);
 
   const join = useCallback(async () => {
     setPhase('joining');
@@ -75,6 +87,8 @@ export default function Room({ room }: { room: string }) {
         audioVideoDidStartConnecting: (reconnecting: boolean) => { if (reconnecting) setReconnects((n) => n + 1); },
         audioVideoDidStop: () => setPhase('lobby'),
         metricsDidReceive: (rep) => {
+          if (Date.now() - lastSentRef.current < REPORT_EVERY_MS) return;
+          lastSentRef.current = Date.now();
           const m = rep.getObservableMetrics();
           const vm = rep.getObservableVideoMetrics();
           const tilesOut: Report['tiles'] = [];
@@ -99,6 +113,7 @@ export default function Room({ room }: { room: string }) {
             tilesVisible: tileCountRef.current,
             tiles: tilesOut,
             hearing: { ...heardRef.current },
+            signals: signalsRef.current,
             net: {
               rttMs: m.currentRoundTripTimeMs,
               audioLossFraction: m.audioPacketsReceivedFractionLoss,
@@ -125,7 +140,10 @@ export default function Room({ room }: { room: string }) {
 
       audioVideo.realtimeSubscribeToAttendeeIdPresence((id: string, present: boolean, externalUserId?: string) => {
         setPeople((p) => {
-          if (!present) { const { [id]: _x, ...rest } = p; return rest; }
+          if (!present) {
+            if (p[id]) setEvents((ev) => [...ev, { t: Date.now(), name: p[id].name, joined: false }].slice(-30));
+            const { [id]: _x, ...rest } = p; return rest;
+          }
           if (id.includes('#')) return p; // content-share pseudo attendee
           audioVideo.realtimeSubscribeToVolumeIndicator(id, (_a, volume, mutedFlag) => {
             const nm = namesRef.current[id];
@@ -134,6 +152,7 @@ export default function Room({ room }: { room: string }) {
           });
           const nm = externalUserId ? pretty(externalUserId) : id.slice(0, 6);
           namesRef.current[id] = nm;
+          if (!p[id]) setEvents((ev) => [...ev, { t: Date.now(), name: nm, joined: true }].slice(-30));
           return { ...p, [id]: { name: nm, volume: 0, muted: false } };
         });
       });
@@ -152,8 +171,17 @@ export default function Room({ room }: { room: string }) {
         audioOutputsChanged: (d) => setOuts((d || []).map((x) => ({ deviceId: x.deviceId, label: x.label || x.deviceId.slice(0, 8) }))),
       });
 
-      if (m[0]) await audioVideo.startAudioInput(m[0].deviceId);
-      if (c[0]) await audioVideo.startVideoInput(c[0].deviceId);
+      if (isBot) {
+        // Bots publish a unique tone + unique-colour video so receivers can verify exactly who they hear/see.
+        const media = makeBotMedia(botNumber(data.displayName), data.displayName);
+        botMediaRef.current = media;
+        await audioVideo.startAudioInput(media.audio);
+        await audioVideo.startVideoInput(media.video);
+        audioVideo.chooseVideoInputQuality(320, 180, 10);
+      } else {
+        if (m[0]) await audioVideo.startAudioInput(m[0].deviceId);
+        if (c[0]) await audioVideo.startVideoInput(c[0].deviceId);
+      }
       if (audioRef.current) audioVideo.bindAudioElement(audioRef.current);
       audioVideo.start();
       audioVideo.startLocalVideoTile();
@@ -167,6 +195,8 @@ export default function Room({ room }: { room: string }) {
   }, [room, isBot, autoShare]);
 
   useEffect(() => { tileCountRef.current = Object.keys(tiles).length; }, [tiles]);
+
+  useEffect(() => { setName((n) => n || randomName()); }, []);
 
   useEffect(() => {
     fetch('/api/me').then((r) => r.json()).then((d) => { setMe(d.user); setNeedCode(!!d.accessCodeRequired); }).catch(() => setMe(null));
@@ -186,7 +216,38 @@ export default function Room({ room }: { room: string }) {
   };
   const logout = async () => { await fetch('/api/logout', { method: 'POST' }); setMe(null); };
 
-  useEffect(() => () => { sessionRef.current?.audioVideo.stop(); }, []);
+  useEffect(() => () => { sessionRef.current?.audioVideo.stop(); botMediaRef.current?.stop(); toneRef.current?.close(); }, []);
+
+  // Every 2s: measure the decoded audio spectrum for each bot's tone, and the rendered pixels of each bot's tile.
+  useEffect(() => {
+    if (phase !== 'joined') return;
+    const timer = setInterval(() => {
+      const me = meNameRef.current;
+      const bots = Object.values(namesRef.current).filter((n) => botNumber(n) > 0 && n !== me);
+
+      const stream = audioRef.current?.srcObject;
+      if (stream instanceof MediaStream && !toneRef.current) {
+        try { toneRef.current = createToneListener(stream); } catch {}
+      }
+      const audio: Record<string, number> = {};
+      if (toneRef.current && bots.length) {
+        Object.assign(audio, toneRef.current.measure(Object.fromEntries(bots.map((n) => [n, toneHz(botNumber(n))]))));
+      }
+
+      const video: Record<string, { hueOk: boolean; moving: boolean }> = {};
+      document.querySelectorAll<HTMLVideoElement>('video[data-name]').forEach((el) => {
+        const name = el.dataset.name!;
+        if (el.dataset.content === '1' || botNumber(name) === 0 || name === me) return;
+        const smp = sampleVideo(el, hueFor(botNumber(name)));
+        if (!smp) { video[name] = { hueOk: false, moving: false }; return; }
+        const prev = prevStripRef.current[name];
+        prevStripRef.current[name] = smp.strip;
+        video[name] = { hueOk: smp.hueOk, moving: prev ? stripChanged(prev, smp.strip) : false };
+      });
+      signalsRef.current = { audio, video };
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [phase]);
 
   const refreshBots = useCallback(async () => {
     const r = await fetch(`/api/bots?room=${encodeURIComponent(room)}`);
@@ -234,7 +295,7 @@ export default function Room({ room }: { room: string }) {
     return (
       <main className="mx-auto max-w-md p-6 space-y-3">
         <h1 className="text-lg font-semibold">Sign in to join “{room}”</h1>
-        <p className="text-sm text-zinc-400">No password. Pick a display name.</p>
+        <p className="text-sm text-zinc-400">No password. We picked a name for you — edit it or just continue.</p>
         <input className="w-full rounded bg-zinc-800 p-2" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && name && login()} />
         {needCode && <input className="w-full rounded bg-zinc-800 p-2" placeholder="Invite code" value={code} onChange={(e) => setCode(e.target.value)} />}
         <button className="rounded bg-blue-600 px-4 py-2 disabled:opacity-40" disabled={!name} onClick={login}>Continue</button>
@@ -266,7 +327,7 @@ export default function Room({ room }: { room: string }) {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             {tileList.map((t) => (
-              <VideoTile key={t.tileId} tileId={t.tileId} label={t.local ? `${label(t)} (you)` : label(t)} speaking={speaking(t)} content={t.content} audioVideo={av} />
+              <VideoTile key={t.tileId} tileId={t.tileId} label={t.local ? `${label(t)} (you)` : label(t)} name={label(t)} speaking={speaking(t)} content={t.content} audioVideo={av} />
             ))}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -282,7 +343,7 @@ export default function Room({ room }: { room: string }) {
             <div className="rounded border border-zinc-700 p-3 text-sm space-y-2">
               <div className="font-medium">Proxy users (bots) — {bots.length} running {bots.length ? `(${bots.join(', ')})` : ''}</div>
               <div className="flex flex-wrap items-center gap-2">
-                <input type="number" min={1} max={10} className="w-16 rounded bg-zinc-800 p-1" value={botCount} onChange={(e) => setBotCount(Number(e.target.value))} />
+                <input type="number" min={1} max={15} className="w-16 rounded bg-zinc-800 p-1" value={botCount} onChange={(e) => setBotCount(Number(e.target.value))} />
                 <button className="rounded bg-emerald-700 px-3 py-1" onClick={() => addBots(false)}>Add bots</button>
                 <button className="rounded bg-emerald-900 px-3 py-1" onClick={() => addBots(true)}>Add bots (with screenshare)</button>
                 <button className="rounded bg-zinc-700 px-3 py-1" onClick={removeBots}>Remove bots</button>
@@ -291,11 +352,31 @@ export default function Room({ room }: { room: string }) {
             </div>
           )}
           {error && <p className="text-red-400 text-sm">{error}</p>}
-          <ul className="text-xs text-zinc-400">
-            {Object.entries(people).map(([id, p]) => (
-              <li key={id}>{p.name}{id === myId ? ' (you)' : ''} — vol {p.volume.toFixed(2)}{p.muted ? ' · muted' : ''}</li>
-            ))}
-          </ul>
+          <div className="grid gap-3 md:grid-cols-2 text-xs">
+            <div className="rounded border border-zinc-700 p-3">
+              <div className="mb-1 font-medium text-sm">In the room ({Object.keys(people).length})</div>
+              <ul className="space-y-0.5">
+                {Object.entries(people).sort((a, b) => a[1].name.localeCompare(b[1].name, undefined, { numeric: true })).map(([id, p]) => {
+                  const hasVideo = tileList.some((t) => !t.content && t.attendeeId === id);
+                  return (
+                    <li key={id} className="flex justify-between">
+                      <span>{botNumber(p.name) ? '🤖 ' : ''}{p.name}{id === myId ? ' (you)' : ''}</span>
+                      <span className="text-zinc-400">{p.muted ? 'muted' : `vol ${p.volume.toFixed(2)}`} · {hasVideo ? 'video' : 'no video'}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+            <div className="rounded border border-zinc-700 p-3">
+              <div className="mb-1 font-medium text-sm">Joined / left</div>
+              <ul className="space-y-0.5 text-zinc-400">
+                {events.length === 0 && <li>nothing yet</li>}
+                {[...events].reverse().map((e, i) => (
+                  <li key={i}>{new Date(e.t).toLocaleTimeString()} — {e.name} {e.joined ? 'joined' : 'left'}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </>
       )}
     </main>

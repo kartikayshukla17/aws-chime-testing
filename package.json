@@ -6,7 +6,6 @@
     "dev": "next dev -p 3100",
     "build": "next build",
     "start": "next start -p 3100",
-    "assets": "bash scripts/make-assets.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "bots": "tsx scripts/bots-cli.ts"

@@ -8,6 +8,8 @@ export interface Report {
   tilesVisible: number;
   tiles: TileReport[];
   hearing: Record<string, number>; // remote name -> max volume (0..1) heard since last report
+  // Verified signals from bot signatures: dB above noise floor per bot tone (>12 = heard), and per-bot video checks.
+  signals?: { audio: Record<string, number>; video: Record<string, { hueOk: boolean; moving: boolean }> };
   net: { rttMs?: number; audioLossFraction?: number; downKbps?: number; upKbps?: number };
 }
 

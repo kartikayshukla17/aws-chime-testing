@@ -1,5 +1,6 @@
 // Run bots from your machine against a local OR deployed app.
-//   npm run bots -- --url https://your-app.vercel.app --room test --count 5 [--share]
+//   npm run bots -- --url https://your-app.vercel.app --room test --count 5 [--start 6] [--share]
+// Use --start so a second runner machine continues numbering (bot-6, bot-7, ...) without clashing names.
 // Needs the same BOT_KEY (and ACCESS_CODE, if set) as the target server, in your local .env.
 import 'dotenv/config';
 import { spawnBots, closeBots } from '../lib/bots';
@@ -10,6 +11,7 @@ const url = get('url', process.env.APP_URL || 'http://localhost:3100');
 const room = get('room', 'test');
 const count = Number(get('count', '3'));
 const share = args.includes('--share');
+const startAt = Number(get('start', '1'));
 
 if (!process.env.BOT_KEY) {
   console.error('BOT_KEY is not set. It must equal the BOT_KEY configured on the server at', url);
@@ -17,7 +19,7 @@ if (!process.env.BOT_KEY) {
 }
 
 (async () => {
-  const res = await spawnBots(room, count, { screenshare: share, baseUrl: url });
+  const res = await spawnBots(room, count, { screenshare: share, baseUrl: url, startAt });
   console.log('started', res, '->', url);
   const stop = async () => { await closeBots(room); process.exit(0); };
   process.on('SIGINT', stop);

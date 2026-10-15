@@ -1,0 +1,219 @@
+'use client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import type { AudioVideoFacade, DefaultMeetingSession } from 'amazon-chime-sdk-js';
+import VideoTile from './VideoTile';
+
+interface Tile { tileId: number; attendeeId: string; content: boolean; local: boolean }
+interface Person { name: string; volume: number; muted: boolean }
+interface Dev { deviceId: string; label: string }
+
+const SPEAKING_THRESHOLD = 0.1;
+
+export default function Room({ room }: { room: string }) {
+  const sp = useSearchParams();
+  const isBot = sp.get('bot') === '1';
+  const autoShare = sp.get('share') === '1';
+  const [name, setName] = useState(sp.get('name') || '');
+  const [phase, setPhase] = useState<'lobby' | 'joining' | 'joined' | 'error'>('lobby');
+  const [error, setError] = useState('');
+  const [tiles, setTiles] = useState<Record<number, Tile>>({});
+  const [people, setPeople] = useState<Record<string, Person>>({});
+  const [myId, setMyId] = useState('');
+  const [mics, setMics] = useState<Dev[]>([]);
+  const [cams, setCams] = useState<Dev[]>([]);
+  const [outs, setOuts] = useState<Dev[]>([]);
+  const [muted, setMuted] = useState(false);
+  const [camOn, setCamOn] = useState(true);
+  const [sharing, setSharing] = useState(false);
+  const [joinMs, setJoinMs] = useState<number | null>(null);
+  const [reconnects, setReconnects] = useState(0);
+  const [bots, setBots] = useState<string[]>([]);
+  const [botCount, setBotCount] = useState(3);
+  const sessionRef = useRef<DefaultMeetingSession | null>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [av, setAv] = useState<AudioVideoFacade | null>(null);
+
+  const join = useCallback(async (displayName: string) => {
+    setPhase('joining');
+    const t0 = Date.now();
+    try {
+      const res = await fetch('/api/attendee', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ room, name: displayName, kind: isBot ? 'bot' : 'human' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'attendee failed');
+
+      const sdk = await import('amazon-chime-sdk-js');
+      const logger = new sdk.ConsoleLogger('chime', sdk.LogLevel.WARN);
+      const deviceController = new sdk.DefaultDeviceController(logger);
+      const config = new sdk.MeetingSessionConfiguration(
+        { Meeting: data.meeting } as never,
+        { Attendee: data.attendee } as never,
+      );
+      const session = new sdk.DefaultMeetingSession(config, logger, deviceController);
+      sessionRef.current = session;
+      const audioVideo = session.audioVideo;
+      setMyId(data.attendee.AttendeeId);
+
+      audioVideo.addObserver({
+        audioVideoDidStart: () => setJoinMs(Date.now() - t0),
+        audioVideoDidStartConnecting: (reconnecting: boolean) => { if (reconnecting) setReconnects((n) => n + 1); },
+        audioVideoDidStop: () => setPhase('lobby'),
+        videoTileDidUpdate: (ts) => {
+          if (!ts.tileId || !ts.boundAttendeeId) return;
+          setTiles((t) => ({
+            ...t,
+            [ts.tileId!]: { tileId: ts.tileId!, attendeeId: ts.boundAttendeeId!, content: !!ts.isContent, local: !!ts.localTile },
+          }));
+        },
+        videoTileWasRemoved: (id) => setTiles((t) => { const { [id]: _x, ...rest } = t; return rest; }),
+      });
+      audioVideo.addContentShareObserver({
+        contentShareDidStart: () => setSharing(true),
+        contentShareDidStop: () => setSharing(false),
+      });
+
+      audioVideo.realtimeSubscribeToAttendeeIdPresence((id: string, present: boolean, externalUserId?: string) => {
+        setPeople((p) => {
+          if (!present) { const { [id]: _x, ...rest } = p; return rest; }
+          if (id.includes('#')) return p; // content-share pseudo attendee
+          audioVideo.realtimeSubscribeToVolumeIndicator(id, (_a, volume, mutedFlag) => {
+            setPeople((q) => (q[id] ? { ...q, [id]: { ...q[id], volume: volume ?? 0, muted: !!mutedFlag } } : q));
+          });
+          return { ...p, [id]: { name: externalUserId || id.slice(0, 6), volume: 0, muted: false } };
+        });
+      });
+
+      const list = async (fn: () => Promise<MediaDeviceInfo[]>) =>
+        (await fn()).map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId.slice(0, 8) }));
+      const [m, c, o] = await Promise.all([
+        list(() => audioVideo.listAudioInputDevices()),
+        list(() => audioVideo.listVideoInputDevices()),
+        list(() => audioVideo.listAudioOutputDevices()),
+      ]);
+      setMics(m); setCams(c); setOuts(o);
+      audioVideo.addDeviceChangeObserver({
+        audioInputsChanged: (d) => setMics((d || []).map((x) => ({ deviceId: x.deviceId, label: x.label || x.deviceId.slice(0, 8) }))),
+        videoInputsChanged: (d) => setCams((d || []).map((x) => ({ deviceId: x.deviceId, label: x.label || x.deviceId.slice(0, 8) }))),
+        audioOutputsChanged: (d) => setOuts((d || []).map((x) => ({ deviceId: x.deviceId, label: x.label || x.deviceId.slice(0, 8) }))),
+      });
+
+      if (m[0]) await audioVideo.startAudioInput(m[0].deviceId);
+      if (c[0]) await audioVideo.startVideoInput(c[0].deviceId);
+      if (audioRef.current) audioVideo.bindAudioElement(audioRef.current);
+      audioVideo.start();
+      audioVideo.startLocalVideoTile();
+      setAv(audioVideo);
+      setPhase('joined');
+      if (autoShare) setTimeout(() => audioVideo.startContentShareFromScreenCapture().catch(() => {}), 3000);
+    } catch (e) {
+      setError((e as Error).message);
+      setPhase('error');
+    }
+  }, [room, isBot, autoShare]);
+
+  useEffect(() => {
+    if (isBot && name && phase === 'lobby') join(name);
+  }, [isBot, name, phase, join]);
+
+  useEffect(() => () => { sessionRef.current?.audioVideo.stop(); }, []);
+
+  const refreshBots = useCallback(async () => {
+    const r = await fetch(`/api/bots?room=${encodeURIComponent(room)}`);
+    if (r.ok) setBots((await r.json()).bots);
+  }, [room]);
+  useEffect(() => { if (phase === 'joined' && !isBot) refreshBots(); }, [phase, isBot, refreshBots]);
+
+  const toggleMute = () => {
+    if (!av) return;
+    if (muted) av.realtimeUnmuteLocalAudio(); else av.realtimeMuteLocalAudio();
+    setMuted(!muted);
+  };
+  const toggleCam = () => {
+    if (!av) return;
+    if (camOn) av.stopLocalVideoTile(); else av.startLocalVideoTile();
+    setCamOn(!camOn);
+  };
+  const toggleShare = async () => {
+    if (!av) return;
+    if (sharing) av.stopContentShare();
+    else await av.startContentShareFromScreenCapture().catch((e) => setError(String(e)));
+  };
+  const addBots = async (share = false) => {
+    const r = await fetch('/api/bots', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room, count: botCount, screenshare: share }) });
+    const d = await r.json();
+    if (!r.ok) setError(d.error);
+    refreshBots();
+  };
+  const removeBots = async () => {
+    await fetch('/api/bots', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room }) });
+    refreshBots();
+  };
+  const endMeeting = async () => {
+    await fetch('/api/meeting', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room }) });
+  };
+
+  const tileList = Object.values(tiles);
+  const label = (t: Tile) => people[t.attendeeId.split('#')[0]]?.name || t.attendeeId.slice(0, 6);
+  const speaking = (t: Tile) => (people[t.attendeeId.split('#')[0]]?.volume ?? 0) > SPEAKING_THRESHOLD;
+
+  if (phase === 'lobby' || phase === 'error') {
+    return (
+      <main className="mx-auto max-w-md p-6 space-y-3">
+        <h1 className="text-lg font-semibold">Room: {room}</h1>
+        <input className="w-full rounded bg-zinc-800 p-2" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
+        <button className="rounded bg-blue-600 px-4 py-2 disabled:opacity-40" disabled={!name} onClick={() => join(name)}>Join</button>
+        {error && <p className="text-red-400 text-sm">{error}</p>}
+      </main>
+    );
+  }
+
+  return (
+    <main className="p-4 space-y-3" data-phase={phase} data-tiles={tileList.length} data-people={Object.keys(people).length}>
+      <audio ref={audioRef} className="hidden" />
+      <header className="flex flex-wrap items-center gap-2 text-sm">
+        <b>{room}</b>
+        <span className="text-zinc-400">{phase === 'joining' ? 'joining…' : `${Object.keys(people).length} in room · ${tileList.length} tiles · join ${joinMs ?? '…'}ms · reconnects ${reconnects}`}</span>
+      </header>
+      {phase === 'joined' && av && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {tileList.map((t) => (
+              <VideoTile key={t.tileId} tileId={t.tileId} label={t.local ? `${label(t)} (you)` : label(t)} speaking={speaking(t)} content={t.content} audioVideo={av} />
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <button className="rounded bg-zinc-700 px-3 py-1" onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
+            <button className="rounded bg-zinc-700 px-3 py-1" onClick={toggleCam}>{camOn ? 'Camera off' : 'Camera on'}</button>
+            <button className="rounded bg-zinc-700 px-3 py-1" onClick={toggleShare}>{sharing ? 'Stop share' : 'Share screen'}</button>
+            <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.startAudioInput(e.target.value)}>{mics.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
+            <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.startVideoInput(e.target.value)}>{cams.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
+            <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.chooseAudioOutput(e.target.value)}>{outs.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
+            <button className="rounded bg-red-700 px-3 py-1" onClick={() => av.stop()}>Leave</button>
+          </div>
+          {!isBot && (
+            <div className="rounded border border-zinc-700 p-3 text-sm space-y-2">
+              <div className="font-medium">Proxy users (bots) — {bots.length} running {bots.length ? `(${bots.join(', ')})` : ''}</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input type="number" min={1} max={10} className="w-16 rounded bg-zinc-800 p-1" value={botCount} onChange={(e) => setBotCount(Number(e.target.value))} />
+                <button className="rounded bg-emerald-700 px-3 py-1" onClick={() => addBots(false)}>Add bots</button>
+                <button className="rounded bg-emerald-900 px-3 py-1" onClick={() => addBots(true)}>Add bots (with screenshare)</button>
+                <button className="rounded bg-zinc-700 px-3 py-1" onClick={removeBots}>Remove bots</button>
+                <button className="rounded bg-red-900 px-3 py-1" onClick={endMeeting}>End meeting for all</button>
+              </div>
+            </div>
+          )}
+          {error && <p className="text-red-400 text-sm">{error}</p>}
+          <ul className="text-xs text-zinc-400">
+            {Object.entries(people).map(([id, p]) => (
+              <li key={id}>{p.name}{id === myId ? ' (you)' : ''} — vol {p.volume.toFixed(2)}{p.muted ? ' · muted' : ''}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </main>
+  );
+}

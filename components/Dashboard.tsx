@@ -95,6 +95,26 @@ export default function Dashboard({ room }: { room: string }) {
                 ))}
               </tbody>
             </table>
+            <table className="w-full text-xs">
+              <thead className="text-zinc-400"><tr><th className="text-left">audio heard from</th><th className="text-left">level (0–1)</th><th>tone rx</th></tr></thead>
+              <tbody>
+                {Array.from(new Set([...Object.keys(r.hearing), ...Object.keys(r.signals?.audio ?? {})])).filter((n) => n !== r.observer).sort().map((n) => {
+                  const lvl = r.hearing[n];
+                  const db = r.signals?.audio[n];
+                  return (
+                    <tr key={n}>
+                      <td>{n}</td>
+                      <td>
+                        <span className="inline-block h-2 w-24 overflow-hidden rounded bg-zinc-800 align-middle"><span className="block h-full bg-green-500" style={{ width: `${Math.round(Math.min(1, lvl ?? 0) * 100)}%` }} /></span>
+                        <span className="ml-1 tabular-nums">{lvl === undefined ? '–' : lvl.toFixed(2)}</span>
+                      </td>
+                      <td className={`text-center ${db !== undefined && db >= AUDIO_OK_DB ? 'text-emerald-400' : 'text-zinc-500'}`}>{db === undefined ? '–' : `${db.toFixed(0)} dB`}</td>
+                    </tr>
+                  );
+                })}
+                {Object.keys(r.hearing).length === 0 && !r.signals?.audio && <tr><td colSpan={3} className="text-zinc-500">silence</td></tr>}
+              </tbody>
+            </table>
           </section>
         ))}
       </div>

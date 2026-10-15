@@ -49,6 +49,7 @@ export default function Room({ room }: { room: string }) {
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [notice, setNotice] = useState('');
   const [botStates, setBotStates] = useState<Record<string, BotPub>>({});
+  const [toneDb, setToneDb] = useState<Record<string, number>>({}); // bot name -> dB of its tone as received here
   const botSelfRef = useRef<BotPub>({ audio: false, video: false }); // bots start with audio+video off
   const sessionRef = useRef<DefaultMeetingSession | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -72,7 +73,7 @@ export default function Room({ room }: { room: string }) {
     signalsRef.current = { audio: {}, video: {} };
     lastSentRef.current = 0;
     setTiles({}); setPeople({}); setEvents([]); setAv(null);
-    setMuted(false); setCamOn(true); setSharing(false); setBots([]); setBotStates({});
+    setMuted(false); setCamOn(true); setSharing(false); setBots([]); setBotStates({}); setToneDb({});
     botSelfRef.current = { audio: false, video: false };
   }, []);
 
@@ -325,6 +326,7 @@ export default function Room({ room }: { room: string }) {
         video[name] = { hueOk: smp.hueOk, moving: prev ? stripChanged(prev, smp.strip) : false };
       });
       signalsRef.current = { audio, video };
+      setToneDb(audio);
     }, 2000);
     return () => clearInterval(timer);
   }, [phase]);
@@ -464,7 +466,16 @@ export default function Room({ room }: { room: string }) {
                     <li key={id} className="flex justify-between">
                       <span>{botNumber(p.name) ? '🤖 ' : ''}{p.name}{id === myId ? ' (you)' : ''}</span>
                       <span className="flex items-center gap-2 text-zinc-400">
-                        {p.muted ? 'muted' : `vol ${p.volume.toFixed(2)}`} · {hasVideo ? 'video' : 'no video'}
+                        <span className="flex w-28 items-center gap-1" title="Level reported by Chime for this participant's microphone (0-1)">
+                          <span className="h-2 flex-1 overflow-hidden rounded bg-zinc-800">
+                            <span className={`block h-full transition-all duration-300 ${p.muted ? 'bg-zinc-600' : 'bg-green-500'}`} style={{ width: `${p.muted ? 0 : Math.round(Math.min(1, p.volume) * 100)}%` }} />
+                          </span>
+                          <span className="w-9 text-right tabular-nums">{p.muted ? 'muted' : p.volume.toFixed(2)}</span>
+                        </span>
+                        {botNumber(p.name) > 0 && id !== myId && toneDb[p.name] !== undefined && (
+                          <span title="Strength of this bot's tone as decoded on this device (dB above the noise floor; above 12 = clearly heard)" className={toneDb[p.name] >= 12 ? 'text-emerald-400' : 'text-zinc-500'}>rx {toneDb[p.name].toFixed(0)} dB</span>
+                        )}
+                        {hasVideo ? 'video' : 'no video'}
                         {botNumber(p.name) > 0 && !isBot && (
                           <>
                             <button className={`rounded px-2 py-0.5 ${botStates[p.name]?.audio ? 'bg-emerald-700 text-white' : 'bg-zinc-700'}`} onClick={() => commandBot(p.name, { audio: !botStates[p.name]?.audio })}>🔊 {botStates[p.name]?.audio ? 'on' : 'off'}</button>

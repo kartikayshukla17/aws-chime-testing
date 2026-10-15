@@ -6,6 +6,8 @@ export const botNumber = (name: string): number => {
   return m ? Number(m[1]) : 0;
 };
 export const toneHz = (n: number) => 300 + n * 100; // bot-1 = 400 Hz ... bot-15 = 1800 Hz
+// Kept low so Chime's 0-1 level meter isn't pinned at 1.00 by a steady tone.
+export const BOT_GAIN = 0.03;
 export const hueFor = (n: number) => (n * 24) % 360;
 
 export function makeBotMedia(n: number, label: string) {
@@ -13,7 +15,7 @@ export function makeBotMedia(n: number, label: string) {
   const osc = ctx.createOscillator();
   osc.frequency.value = toneHz(n);
   const gain = ctx.createGain();
-  gain.gain.value = 0.3;
+  gain.gain.value = BOT_GAIN;
   const dest = ctx.createMediaStreamDestination();
   osc.connect(gain).connect(dest);
   osc.start();

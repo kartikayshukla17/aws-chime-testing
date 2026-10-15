@@ -6,7 +6,7 @@ import VideoTile from './VideoTile';
 import AvatarTile from './AvatarTile';
 import type { Report } from '@/lib/reports';
 import { authHeaders, getToken, getTokenName, setToken } from '@/lib/clientauth';
-import { botNumber, createToneListener, hueFor, makeBotMedia, sampleVideo, stripChanged, toneHz, type VideoSample } from '@/lib/botsignal';
+import { botNumber, createToneListener, hueFor, makeBotMedia, makeBotScreen, sampleVideo, stripChanged, toneHz, type VideoSample } from '@/lib/botsignal';
 
 interface Tile { tileId: number; attendeeId: string; content: boolean; local: boolean }
 interface Person { name: string; volume: number; muted: boolean }
@@ -40,8 +40,11 @@ export default function Room({ room }: { room: string }) {
   const [mics, setMics] = useState<Dev[]>([]);
   const [cams, setCams] = useState<Dev[]>([]);
   const [outs, setOuts] = useState<Dev[]>([]);
-  const [muted, setMuted] = useState(false);
-  const [camOn, setCamOn] = useState(true);
+  // People join with mic and camera fully off (devices aren't even opened) and turn them on when they want to.
+  const [muted, setMuted] = useState(true);
+  const [camOn, setCamOn] = useState(false);
+  const [micId, setMicId] = useState('');
+  const [camId, setCamId] = useState('');
   const [sharing, setSharing] = useState(false);
   const [joinMs, setJoinMs] = useState<number | null>(null);
   const [reconnects, setReconnects] = useState(0);
@@ -70,18 +73,20 @@ export default function Room({ room }: { room: string }) {
   const signalsRef = useRef<NonNullable<Report['signals']>>({ audio: {}, video: {} });
   const prevStripRef = useRef<Record<string, VideoSample['strip']>>({});
   const botMediaRef = useRef<ReturnType<typeof makeBotMedia> | null>(null);
+  const botScreenRef = useRef<ReturnType<typeof makeBotScreen> | null>(null);
   const toneRef = useRef<ReturnType<typeof createToneListener> | null>(null);
 
   // Clears everything tied to the current session so the user can rejoin cleanly.
   const resetLocal = useCallback(() => {
     botMediaRef.current?.stop(); botMediaRef.current = null;
+    botScreenRef.current?.stop(); botScreenRef.current = null;
     toneRef.current?.close(); toneRef.current = null;
     if (botGuardRef.current.timer) { clearTimeout(botGuardRef.current.timer); botGuardRef.current = { everHuman: false }; }
     namesRef.current = {}; humanIdsRef.current = new Set(); heardRef.current = {}; prevStripRef.current = {};
     signalsRef.current = { audio: {}, video: {} };
     lastSentRef.current = 0;
     setTiles({}); setPeople({}); setEvents([]); setAv(null);
-    setMuted(false); setCamOn(true); setSharing(false); setBots([]); setBotStates({}); setToneDb({});
+    setMuted(true); setCamOn(false); setSharing(false); setBots([]); setBotStates({}); setToneDb({});
     botSelfRef.current = { audio: false, video: false };
   }, []);
 
@@ -274,16 +279,20 @@ export default function Room({ room }: { room: string }) {
         await audioVideo.startAudioInput(media.audio);
         await audioVideo.startVideoInput(media.video);
         audioVideo.chooseVideoInputQuality(320, 180, 10);
-      } else {
-        if (m[0]) await audioVideo.startAudioInput(m[0].deviceId);
-        if (c[0]) await audioVideo.startVideoInput(c[0].deviceId);
       }
+      // Humans: no startAudioInput / startVideoInput here, so no mic or camera is opened until they ask.
       if (audioRef.current) audioVideo.bindAudioElement(audioRef.current);
       audioVideo.start();
-      if (!isBot) audioVideo.startLocalVideoTile();
       setAv(audioVideo);
       setPhase('joined');
-      if (autoShare) setTimeout(() => audioVideo.startContentShareFromScreenCapture().catch(() => {}), 3000);
+      if (autoShare && isBot) {
+        // Bots can't capture a real screen, so they share a generated one.
+        setTimeout(() => {
+          const screen = makeBotScreen(data.displayName);
+          botScreenRef.current = screen;
+          audioVideo.startContentShare(screen.stream).catch((e) => setError(`Bot screenshare: ${(e as Error).message}`));
+        }, 3000);
+      }
     } catch (e) {
       setError((e as Error).message);
       setPhase('error');
@@ -385,15 +394,41 @@ export default function Room({ room }: { room: string }) {
   }, [room]);
   useEffect(() => { if (phase === 'joined' && !isBot) refreshBots(); }, [phase, isBot, refreshBots]);
 
-  const toggleMute = () => {
-    if (!av) return;
-    if (muted) av.realtimeUnmuteLocalAudio(); else av.realtimeMuteLocalAudio();
-    setMuted(!muted);
+  // Device lists have empty ids/labels until the browser grants permission, so re-read them after first use.
+  const refreshDevices = async (facade: AudioVideoFacade) => {
+    const map = (d: MediaDeviceInfo[]) => d.map((x) => ({ deviceId: x.deviceId, label: x.label || 'Default' }));
+    setMics(map(await facade.listAudioInputDevices()));
+    setCams(map(await facade.listVideoInputDevices()));
   };
-  const toggleCam = () => {
+  const toggleMute = async () => {
     if (!av) return;
-    if (camOn) av.stopLocalVideoTile(); else av.startLocalVideoTile();
-    setCamOn(!camOn);
+    try {
+      if (muted) {
+        await av.startAudioInput(micId || {}); // opens the mic (permission prompt the first time)
+        av.realtimeUnmuteLocalAudio();
+        setMuted(false);
+        refreshDevices(av);
+      } else {
+        av.realtimeMuteLocalAudio();
+        await av.stopAudioInput(); // releases the mic, so the browser's recording indicator goes off
+        setMuted(true);
+      }
+    } catch (e) { setError(`Microphone: ${(e as Error).message || 'permission denied'}`); }
+  };
+  const toggleCam = async () => {
+    if (!av) return;
+    try {
+      if (!camOn) {
+        await av.startVideoInput(camId || {});
+        av.startLocalVideoTile();
+        setCamOn(true);
+        refreshDevices(av);
+      } else {
+        av.stopLocalVideoTile();
+        await av.stopVideoInput(); // releases the camera, so its light goes off
+        setCamOn(false);
+      }
+    } catch (e) { setError(`Camera: ${(e as Error).message || 'permission denied'}`); }
   };
   const toggleShare = async () => {
     if (!av) return;
@@ -496,9 +531,18 @@ export default function Room({ room }: { room: string }) {
             <button className="rounded bg-zinc-700 px-3 py-1" onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
             <button className="rounded bg-zinc-700 px-3 py-1" onClick={toggleCam}>{camOn ? 'Camera off' : 'Camera on'}</button>
             <button className="rounded bg-zinc-700 px-3 py-1" onClick={toggleShare}>{sharing ? 'Stop share' : 'Share screen'}</button>
-            <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.startAudioInput(e.target.value)}>{mics.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
-            <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.startVideoInput(e.target.value)}>{cams.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
-            <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.chooseAudioOutput(e.target.value)}>{outs.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
+            <select className="rounded bg-zinc-800 p-1" title="Microphone" value={micId} onChange={(e) => { setMicId(e.target.value); if (!muted) av.startAudioInput(e.target.value || {}); }}>
+              {mics.length === 0 && <option value="">Default microphone</option>}
+              {mics.map((d, i) => <option key={`${d.deviceId}-${i}`} value={d.deviceId}>{d.label}</option>)}
+            </select>
+            <select className="rounded bg-zinc-800 p-1" title="Camera" value={camId} onChange={(e) => { setCamId(e.target.value); if (camOn) av.startVideoInput(e.target.value || {}); }}>
+              {cams.length === 0 && <option value="">Default camera</option>}
+              {cams.map((d, i) => <option key={`${d.deviceId}-${i}`} value={d.deviceId}>{d.label}</option>)}
+            </select>
+            <select className="rounded bg-zinc-800 p-1" title="Speaker" onChange={(e) => av.chooseAudioOutput(e.target.value)}>
+              {outs.length === 0 && <option value="">Default speaker</option>}
+              {outs.map((d, i) => <option key={`${d.deviceId}-${i}`} value={d.deviceId}>{d.label}</option>)}
+            </select>
             <button className="rounded bg-red-700 px-3 py-1" onClick={leave}>Leave</button>
             {!isBot && <button className="rounded bg-red-900 px-3 py-1" onClick={endMeeting}>End meeting for all</button>}
           </div>
@@ -515,7 +559,7 @@ export default function Room({ room }: { room: string }) {
               <div className="flex flex-wrap items-center gap-2">
                 <input type="number" min={1} max={botMax} className="w-16 rounded bg-zinc-800 p-1" value={botCount} onChange={(e) => setBotCount(Number(e.target.value))} />
                 <button className="rounded bg-emerald-700 px-3 py-1" onClick={() => addBots(false)}>Add bots</button>
-                <button className="rounded bg-emerald-900 px-3 py-1" onClick={() => addBots(true)}>Add bots (with screenshare)</button>
+                <button className="rounded bg-emerald-900 px-3 py-1" title="Each bot also shares a generated screen (a slide with its name, the time and a moving bar) about 3 seconds after joining, to test screen sharing" onClick={() => addBots(true)}>Add bots (with screenshare)</button>
                 <button className="rounded bg-zinc-700 px-3 py-1" onClick={removeBots}>Remove bots</button>
               </div>
             </div>

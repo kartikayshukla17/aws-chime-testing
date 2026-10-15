@@ -8,9 +8,10 @@ Standalone app for evaluating the Amazon Chime SDK as a replacement for Agora in
 3. `npm run dev` then open http://localhost:3100
 
 ## Testing with multiple users
+- **Mic and camera start fully off:** nothing is opened when you join. *Unmute* / *Camera on* open the device (the browser asks permission the first time), and turning them off releases it again.
 - **Home page:** *Create meeting* suggests a random meeting name (editable) and takes you in; *Join meeting* takes the name of a running meeting and tells you if no such meeting exists. You then pick a display name (random one pre-filled).
 - Open `/room/test` in several tabs or browsers and join with different names.
-- Use the **Proxy users** panel in a room to launch headless Chromium bots. They run the same client code. Each bot publishes its own tone (bot-N = 300+100·N Hz) and a plain-colour video with its name and a moving bar, and can start a screenshare. Set `ENABLE_BOTS=1` in `.env` to get the panel.
+- Use the **Proxy users** panel in a room to launch headless Chromium bots. They run the same client code. Each bot publishes its own tone (bot-N = 300+100·N Hz) and a plain-colour video with its name and a moving bar, and, with `--share` / "Add bots (with screenshare)", each also shares a generated screen (headless browsers have no real screen to capture). Set `ENABLE_BOTS=1` in `.env` to get the panel.
 - Bots run on this machine, so keep the count modest. `MAX_BOTS` caps it (default 10).
 
 - **Concurrent testers and rooms:** a room is just the name in the URL (`/room/<room>`); different names are separate, simultaneous meetings. Put a name in the link (`/room/test?name=Alice`) and that tab logs in as Alice using a per-tab token, so one browser can hold several testers (cookies alone would make every tab the same person). The room header has *Copy invite link* and *+ Another tester tab*.

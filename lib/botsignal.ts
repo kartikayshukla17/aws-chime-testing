@@ -45,6 +45,30 @@ export function makeBotMedia(n: number, label: string) {
   };
 }
 
+// A fake "shared screen" for bots: headless browsers have no screen to capture, so this stands in for one.
+export function makeBotScreen(label: string) {
+  const W = 640, H = 360;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const c = canvas.getContext('2d')!;
+  const draw = () => {
+    c.fillStyle = '#0f172a';
+    c.fillRect(0, 0, W, H);
+    c.fillStyle = '#e2e8f0';
+    c.font = 'bold 40px sans-serif';
+    c.textAlign = 'center';
+    c.fillText(`${label} · shared screen`, W / 2, 150);
+    c.font = '20px sans-serif';
+    c.fillText(new Date().toLocaleTimeString(), W / 2, 200);
+    c.fillStyle = '#38bdf8';
+    c.fillRect(((Date.now() / 8) % W) - 30, 280, 60, 16); // moving bar so a frozen share is obvious
+  };
+  draw();
+  const timer = setInterval(draw, 200);
+  const stream = canvas.captureStream(5);
+  return { stream, stop: () => { clearInterval(timer); stream.getTracks().forEach((t) => t.stop()); } };
+}
+
 const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 
 export function createToneListener(stream: MediaStream) {

@@ -6,17 +6,23 @@ const fmt = (n: number | undefined, d = 0) => (n === undefined || Number.isNaN(n
 const AUDIO_OK_DB = 12; // tone must be this many dB above the local noise floor to count as heard
 const botNum = (n: string) => Number(/^bot-(\d+)$/.exec(n)?.[1] ?? 0);
 
-function Cell({ r, sender }: { r: Report; sender: string }) {
+function Cell({ r, sender, pub }: { r: Report; sender: string; pub?: Report['publishing'] }) {
   if (r.observer === sender) return <td className="p-1 text-center text-zinc-600">—</td>;
   if (!r.signals) return <td className="p-1 text-center text-zinc-500">…</td>;
   const db = r.signals.audio[sender];
   const v = r.signals.video[sender];
-  const a = db !== undefined && db >= AUDIO_OK_DB;
+  // A bot that is deliberately off (the default) is not a failure.
+  const aOff = pub ? !pub.audio : false;
+  const vOff = pub ? !pub.video : false;
+  const aOk = db !== undefined && db >= AUDIO_OK_DB;
   const vOk = !!v && v.hueOk && v.moving;
-  const ok = a && vOk;
+  const failed = (!aOff && !aOk) || (!vOff && !vOk);
+  const allOff = aOff && vOff;
+  const tone = allOff ? 'bg-zinc-800' : failed ? 'bg-red-900/50' : 'bg-emerald-900/50';
+  const sym = (off: boolean, ok: boolean) => (off ? '–' : ok ? '✓' : '✗');
   return (
-    <td className={`p-1 text-center ${ok ? 'bg-emerald-900/50' : 'bg-red-900/50'}`} title={`audio ${db === undefined ? 'n/a' : db.toFixed(1) + ' dB over floor'} · video ${v ? `colour ${v.hueOk ? 'ok' : 'WRONG'}, ${v.moving ? 'moving' : 'FROZEN'}` : 'no tile'}`}>
-      <span className={a ? '' : 'text-red-300'}>A{a ? '✓' : '✗'}</span> <span className={vOk ? '' : 'text-red-300'}>V{vOk ? '✓' : '✗'}</span>
+    <td className={`p-1 text-center ${tone}`} title={`audio ${aOff ? 'off' : db === undefined ? 'n/a' : db.toFixed(1) + ' dB over floor'} · video ${vOff ? 'off' : v ? `colour ${v.hueOk ? 'ok' : 'WRONG'}, ${v.moving ? 'moving' : 'FROZEN'}` : 'no tile'}`}>
+      <span className={!aOff && !aOk ? 'text-red-300' : ''}>A{sym(aOff, aOk)}</span> <span className={!vOff && !vOk ? 'text-red-300' : ''}>V{sym(vOff, vOk)}</span>
     </td>
   );
 }
@@ -47,7 +53,7 @@ export default function Dashboard({ room }: { room: string }) {
     <main className="p-4 space-y-4">
       <h1 className="text-lg font-semibold">What each participant receives — {room}</h1>
       <p className="text-xs text-zinc-400">
-        Rows = who is receiving, columns = which bot. Every bot publishes its own tone and colour video; a cell is green when the receiver actually decoded that bot’s audio (tone above the noise floor) <b>and</b> its video (right colour, frames changing). Hover a cell for the numbers. Updates every ~10s.
+        Rows = who is receiving, columns = which bot. Every bot publishes its own tone and colour video once a person turns it on (bots start with audio and video off, shown grey with “–”); a cell is green when the receiver actually decoded that bot’s audio (tone above the noise floor) <b>and</b> its video (right colour, frames changing). Hover a cell for the numbers. Updates every ~10s.
       </p>
       {reports.length === 0 && <p className="text-sm text-zinc-400">No reports yet. Join the room first.</p>}
 
@@ -61,7 +67,7 @@ export default function Dashboard({ room }: { room: string }) {
               {observers.map((r) => (
                 <tr key={r.observer} className={fresh(r) ? '' : 'opacity-40'}>
                   <td className="p-1 pr-3 whitespace-nowrap">{r.isBot ? '🤖 ' : ''}{r.observer}{fresh(r) ? '' : ' (stale)'}</td>
-                  {senders.map((s) => <Cell key={s} r={r} sender={s} />)}
+                  {senders.map((s) => <Cell key={s} r={r} sender={s} pub={bots.find((b) => b.observer === s)?.publishing} />)}
                 </tr>
               ))}
             </tbody>

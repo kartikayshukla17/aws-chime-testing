@@ -16,6 +16,9 @@ const ADJ = ['Swift', 'Quiet', 'Brave', 'Lucky', 'Calm', 'Witty', 'Bold', 'Sunny
 const ANIMAL = ['Otter', 'Falcon', 'Panda', 'Fox', 'Heron', 'Lynx', 'Koala', 'Gecko'];
 const randomName = () => `${ADJ[Math.floor(Math.random() * ADJ.length)]} ${ANIMAL[Math.floor(Math.random() * ANIMAL.length)]}`;
 interface LogEvent { t: number; name: string; joined: boolean }
+interface BotPub { audio: boolean; video: boolean }
+const BOT_CMD = 'bot-cmd';     // human -> bots: { target: 'bot-3' | '*', audio?, video? }
+const BOT_STATE = 'bot-state'; // bot -> everyone: { audio, video }
 // ExternalUserId is `${kind}-${name}-${id}`; show just the name.
 const pretty = (x: string) => x.replace(/^(human|bot)-/, '').replace(/-[0-9a-f]{8}$/, '');
 
@@ -45,6 +48,8 @@ export default function Room({ room }: { room: string }) {
   const [botsEnabled, setBotsEnabled] = useState(false);
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [notice, setNotice] = useState('');
+  const [botStates, setBotStates] = useState<Record<string, BotPub>>({});
+  const botSelfRef = useRef<BotPub>({ audio: false, video: false }); // bots start with audio+video off
   const sessionRef = useRef<DefaultMeetingSession | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [av, setAv] = useState<AudioVideoFacade | null>(null);
@@ -67,7 +72,8 @@ export default function Room({ room }: { room: string }) {
     signalsRef.current = { audio: {}, video: {} };
     lastSentRef.current = 0;
     setTiles({}); setPeople({}); setEvents([]); setAv(null);
-    setMuted(false); setCamOn(true); setSharing(false); setBots([]);
+    setMuted(false); setCamOn(true); setSharing(false); setBots([]); setBotStates({});
+    botSelfRef.current = { audio: false, video: false };
   }, []);
 
   const join = useCallback(async () => {
@@ -98,7 +104,13 @@ export default function Room({ room }: { room: string }) {
       meNameRef.current = data.displayName;
 
       audioVideo.addObserver({
-        audioVideoDidStart: () => setJoinMs(Date.now() - t0),
+        audioVideoDidStart: () => {
+          setJoinMs(Date.now() - t0);
+          if (isBot) {
+            audioVideo.realtimeMuteLocalAudio(); // default off; a human turns it on per bot
+            audioVideo.realtimeSendDataMessage(BOT_STATE, botSelfRef.current, 30000);
+          }
+        },
         audioVideoDidStartConnecting: (reconnecting: boolean) => { if (reconnecting) setReconnects((n) => n + 1); },
         audioVideoDidStop: (status) => {
           if (status.statusCode() === sdk.MeetingSessionStatusCode.MeetingEnded) setNotice('The meeting was ended for everyone.');
@@ -132,6 +144,7 @@ export default function Room({ room }: { room: string }) {
             ts: Date.now(),
             tilesVisible: tileCountRef.current,
             tiles: tilesOut,
+            publishing: isBot ? { ...botSelfRef.current } : undefined,
             hearing: { ...heardRef.current },
             signals: signalsRef.current,
             net: {
@@ -158,23 +171,52 @@ export default function Room({ room }: { room: string }) {
         contentShareDidStop: () => setSharing(false),
       });
 
-      audioVideo.realtimeSubscribeToAttendeeIdPresence((id: string, present: boolean, externalUserId?: string) => {
-        setPeople((p) => {
-          if (!present) {
-            if (p[id]) setEvents((ev) => [...ev, { t: Date.now(), name: p[id].name, joined: false }].slice(-30));
-            const { [id]: _x, ...rest } = p; return rest;
+      const sendBotState = () => audioVideo.realtimeSendDataMessage(BOT_STATE, botSelfRef.current, 30000);
+      if (isBot) {
+        audioVideo.realtimeSubscribeToReceiveDataMessage(BOT_CMD, (msg) => {
+          // Only humans may command bots. senderExternalUserId is set by our server, so it can't be forged by a client.
+          if (!msg.senderExternalUserId.startsWith('human-')) return;
+          const c = msg.json() as { target?: string; audio?: boolean; video?: boolean };
+          if (c.target !== '*' && c.target !== meNameRef.current) return;
+          if (typeof c.audio === 'boolean') {
+            if (c.audio) audioVideo.realtimeUnmuteLocalAudio(); else audioVideo.realtimeMuteLocalAudio();
+            botSelfRef.current.audio = c.audio;
           }
-          if (id.includes('#')) return p; // content-share pseudo attendee
-          audioVideo.realtimeSubscribeToVolumeIndicator(id, (_a, volume, mutedFlag) => {
-            const nm = namesRef.current[id];
-            if (nm && !mutedFlag) heardRef.current[nm] = Math.max(heardRef.current[nm] ?? 0, volume ?? 0);
-            setPeople((q) => (q[id] ? { ...q, [id]: { ...q[id], volume: volume ?? 0, muted: !!mutedFlag } } : q));
-          });
-          const nm = externalUserId ? pretty(externalUserId) : id.slice(0, 6);
-          namesRef.current[id] = nm;
-          if (!p[id]) setEvents((ev) => [...ev, { t: Date.now(), name: nm, joined: true }].slice(-30));
-          return { ...p, [id]: { name: nm, volume: 0, muted: false } };
+          if (typeof c.video === 'boolean') {
+            if (c.video) audioVideo.startLocalVideoTile(); else audioVideo.stopLocalVideoTile();
+            botSelfRef.current.video = c.video;
+          }
+          sendBotState();
         });
+      }
+      audioVideo.realtimeSubscribeToReceiveDataMessage(BOT_STATE, (msg) => {
+        if (!msg.senderExternalUserId.startsWith('bot-')) return;
+        const st = msg.json() as BotPub;
+        setBotStates((b) => ({ ...b, [pretty(msg.senderExternalUserId)]: { audio: !!st.audio, video: !!st.video } }));
+      });
+
+      audioVideo.realtimeSubscribeToAttendeeIdPresence((id: string, present: boolean, externalUserId?: string) => {
+        if (id.includes('#')) return; // content-share pseudo attendee
+        // Side effects live outside the state updaters so React's double-invoke can't duplicate them.
+        if (!present) {
+          const gone = namesRef.current[id];
+          if (!gone) return;
+          delete namesRef.current[id];
+          audioVideo.realtimeUnsubscribeFromVolumeIndicator(id);
+          setEvents((ev) => [...ev, { t: Date.now(), name: gone, joined: false }].slice(-30));
+          setPeople((p) => { const { [id]: _x, ...rest } = p; return rest; });
+          return;
+        }
+        if (namesRef.current[id]) return; // already known
+        const nm = externalUserId ? pretty(externalUserId) : id.slice(0, 6);
+        namesRef.current[id] = nm;
+        audioVideo.realtimeSubscribeToVolumeIndicator(id, (_a, volume, mutedFlag) => {
+          const who = namesRef.current[id];
+          if (who && !mutedFlag) heardRef.current[who] = Math.max(heardRef.current[who] ?? 0, volume ?? 0);
+          setPeople((q) => (q[id] ? { ...q, [id]: { ...q[id], volume: volume ?? 0, muted: !!mutedFlag } } : q));
+        });
+        setEvents((ev) => [...ev, { t: Date.now(), name: nm, joined: true }].slice(-30));
+        setPeople((p) => ({ ...p, [id]: { name: nm, volume: 0, muted: false } }));
       });
 
       const list = async (fn: () => Promise<MediaDeviceInfo[]>) =>
@@ -204,7 +246,7 @@ export default function Room({ room }: { room: string }) {
       }
       if (audioRef.current) audioVideo.bindAudioElement(audioRef.current);
       audioVideo.start();
-      audioVideo.startLocalVideoTile();
+      if (!isBot) audioVideo.startLocalVideoTile();
       setAv(audioVideo);
       setPhase('joined');
       if (autoShare) setTimeout(() => audioVideo.startContentShareFromScreenCapture().catch(() => {}), 3000);
@@ -237,6 +279,24 @@ export default function Room({ room }: { room: string }) {
   const logout = async () => { await fetch('/api/logout', { method: 'POST' }); setMe(null); };
 
   useEffect(() => () => { sessionRef.current?.audioVideo.stop(); botMediaRef.current?.stop(); toneRef.current?.close(); }, []);
+
+  useEffect(() => {
+    if (!isBot || phase !== 'joined' || !av) return;
+    const i = setInterval(() => av.realtimeSendDataMessage(BOT_STATE, botSelfRef.current, 30000), 5000);
+    return () => clearInterval(i);
+  }, [isBot, phase, av]);
+
+  // Humans: turn a bot's (or every bot's) published audio/video on or off. Affects everyone in the room.
+  const commandBot = (target: string, patch: Partial<BotPub>) => {
+    if (!av || isBot) return;
+    av.realtimeSendDataMessage(BOT_CMD, { target, ...patch }, 1000);
+    setBotStates((b) => {
+      const names = target === '*' ? Object.values(people).map((p) => p.name).filter((n) => botNumber(n) > 0) : [target];
+      const next = { ...b };
+      for (const n of names) next[n] = { audio: b[n]?.audio ?? false, video: b[n]?.video ?? false, ...patch };
+      return next;
+    });
+  };
 
   // Every 2s: measure the decoded audio spectrum for each bot's tone, and the rendered pixels of each bot's tile.
   useEffect(() => {
@@ -385,14 +445,33 @@ export default function Room({ room }: { room: string }) {
           {error && <p className="text-red-400 text-sm">{error}</p>}
           <div className="grid gap-3 md:grid-cols-2 text-xs">
             <div className="rounded border border-zinc-700 p-3">
-              <div className="mb-1 font-medium text-sm">In the room ({Object.keys(people).length})</div>
+              <div className="mb-1 flex flex-wrap items-center gap-2 font-medium text-sm">
+                <span>In the room ({Object.keys(people).length})</span>
+                {!isBot && Object.values(people).some((p) => botNumber(p.name) > 0) && (
+                  <span className="flex flex-wrap items-center gap-1 text-xs font-normal">
+                    all bots:
+                    <button className="rounded bg-zinc-700 px-2 py-0.5" onClick={() => commandBot('*', { audio: true })}>🔊 on</button>
+                    <button className="rounded bg-zinc-700 px-2 py-0.5" onClick={() => commandBot('*', { audio: false })}>🔊 off</button>
+                    <button className="rounded bg-zinc-700 px-2 py-0.5" onClick={() => commandBot('*', { video: true })}>📹 on</button>
+                    <button className="rounded bg-zinc-700 px-2 py-0.5" onClick={() => commandBot('*', { video: false })}>📹 off</button>
+                  </span>
+                )}
+              </div>
               <ul className="space-y-0.5">
                 {Object.entries(people).sort((a, b) => a[1].name.localeCompare(b[1].name, undefined, { numeric: true })).map(([id, p]) => {
                   const hasVideo = tileList.some((t) => !t.content && t.attendeeId === id);
                   return (
                     <li key={id} className="flex justify-between">
                       <span>{botNumber(p.name) ? '🤖 ' : ''}{p.name}{id === myId ? ' (you)' : ''}</span>
-                      <span className="text-zinc-400">{p.muted ? 'muted' : `vol ${p.volume.toFixed(2)}`} · {hasVideo ? 'video' : 'no video'}</span>
+                      <span className="flex items-center gap-2 text-zinc-400">
+                        {p.muted ? 'muted' : `vol ${p.volume.toFixed(2)}`} · {hasVideo ? 'video' : 'no video'}
+                        {botNumber(p.name) > 0 && !isBot && (
+                          <>
+                            <button className={`rounded px-2 py-0.5 ${botStates[p.name]?.audio ? 'bg-emerald-700 text-white' : 'bg-zinc-700'}`} onClick={() => commandBot(p.name, { audio: !botStates[p.name]?.audio })}>🔊 {botStates[p.name]?.audio ? 'on' : 'off'}</button>
+                            <button className={`rounded px-2 py-0.5 ${botStates[p.name]?.video ? 'bg-emerald-700 text-white' : 'bg-zinc-700'}`} onClick={() => commandBot(p.name, { video: !botStates[p.name]?.video })}>📹 {botStates[p.name]?.video ? 'on' : 'off'}</button>
+                          </>
+                        )}
+                      </span>
                     </li>
                   );
                 })}

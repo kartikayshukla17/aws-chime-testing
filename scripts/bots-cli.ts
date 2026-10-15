@@ -3,7 +3,7 @@
 // Use --start so a second runner machine continues numbering (bot-6, bot-7, ...) without clashing names.
 // Needs the same BOT_KEY (and ACCESS_CODE, if set) as the target server, in your local .env.
 import 'dotenv/config';
-import { spawnBots, closeBots } from '../lib/bots';
+import { spawnBots, closeBots, listBots } from '../lib/bots';
 
 const args = process.argv.slice(2);
 const get = (k: string, d: string) => (args.includes(`--${k}`) ? args[args.indexOf(`--${k}`) + 1] : d);
@@ -24,5 +24,6 @@ if (!process.env.BOT_KEY) {
   const stop = async () => { await closeBots(room); process.exit(0); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
-  console.log('Bots running. Ctrl+C to stop.');
+  console.log('Bots running. Ctrl+C to stop (they also stop on their own when no humans remain; see BOT_IDLE_MINUTES).');
+  setInterval(() => { if (listBots(room).length === 0) { console.log('No bots left, exiting.'); process.exit(0); } }, 5000);
 })();

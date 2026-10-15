@@ -49,6 +49,7 @@ export default function Room({ room }: { room: string }) {
   const [botCount, setBotCount] = useState(3);
   const [botsEnabled, setBotsEnabled] = useState(false);
   const [botMax, setBotMax] = useState(15);
+  const [idleMin, setIdleMin] = useState(0);
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [notice, setNotice] = useState('');
   const [botStates, setBotStates] = useState<Record<string, BotPub>>({});
@@ -62,6 +63,7 @@ export default function Room({ room }: { room: string }) {
   const tileCountRef = useRef(0);
   const meNameRef = useRef('');
   const myIdRef = useRef('');
+  const humanIdsRef = useRef<Set<string>>(new Set());
   const lastSentRef = useRef(0);
   const signalsRef = useRef<NonNullable<Report['signals']>>({ audio: {}, video: {} });
   const prevStripRef = useRef<Record<string, VideoSample['strip']>>({});
@@ -72,7 +74,7 @@ export default function Room({ room }: { room: string }) {
   const resetLocal = useCallback(() => {
     botMediaRef.current?.stop(); botMediaRef.current = null;
     toneRef.current?.close(); toneRef.current = null;
-    namesRef.current = {}; heardRef.current = {}; prevStripRef.current = {};
+    namesRef.current = {}; humanIdsRef.current = new Set(); heardRef.current = {}; prevStripRef.current = {};
     signalsRef.current = { audio: {}, video: {} };
     lastSentRef.current = 0;
     setTiles({}); setPeople({}); setEvents([]); setAv(null);
@@ -148,6 +150,7 @@ export default function Room({ room }: { room: string }) {
             ts: Date.now(),
             tilesVisible: tileCountRef.current,
             tiles: tilesOut,
+            humans: humanIdsRef.current.size,
             publishing: isBot ? { ...botSelfRef.current } : undefined,
             hearing: { ...heardRef.current },
             signals: signalsRef.current,
@@ -206,6 +209,7 @@ export default function Room({ room }: { room: string }) {
           const gone = namesRef.current[id];
           if (!gone) return;
           delete namesRef.current[id];
+          humanIdsRef.current.delete(id);
           audioVideo.realtimeUnsubscribeFromVolumeIndicator(id);
           setEvents((ev) => [...ev, { t: Date.now(), name: gone, joined: false }].slice(-30));
           setPeople((p) => { const { [id]: _x, ...rest } = p; return rest; });
@@ -214,6 +218,7 @@ export default function Room({ room }: { room: string }) {
         if (namesRef.current[id]) return; // already known
         const nm = externalUserId ? pretty(externalUserId) : id.slice(0, 6);
         namesRef.current[id] = nm;
+        if (externalUserId?.startsWith('human-')) humanIdsRef.current.add(id);
         audioVideo.realtimeSubscribeToVolumeIndicator(id, (_a, volume, mutedFlag) => {
           const who = namesRef.current[id];
           if (who && !mutedFlag) heardRef.current[who] = Math.max(heardRef.current[who] ?? 0, volume ?? 0);
@@ -351,7 +356,7 @@ export default function Room({ room }: { room: string }) {
   const refreshBots = useCallback(async () => {
     const r = await fetch(`/api/bots?room=${encodeURIComponent(room)}`);
     setBotsEnabled(r.ok);
-    if (r.ok) { const d = await r.json(); setBots(d.bots); setBotMax(d.max); }
+    if (r.ok) { const d = await r.json(); setBots(d.bots); setBotMax(d.max); setIdleMin(d.idleMinutes ?? 0); }
   }, [room]);
   useEffect(() => { if (phase === 'joined' && !isBot) refreshBots(); }, [phase, isBot, refreshBots]);
 
@@ -479,6 +484,7 @@ export default function Room({ room }: { room: string }) {
                 <span className="ml-2 text-xs font-normal text-zinc-400">
                   {botMax} = cap on this machine (MAX_BOTS). Chime allows 250 people and 25 live videos per meeting.
                   Videos on now: {tileList.filter((t) => !t.content).length} / 25.
+                  {idleMin > 0 ? ` Bots stop by themselves ${idleMin} min after the last person leaves.` : ''}
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">

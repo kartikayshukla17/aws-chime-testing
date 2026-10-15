@@ -11,6 +11,8 @@ export interface Report {
   // Verified signals from bot signatures: dB above noise floor per bot tone (>12 = heard), and per-bot video checks.
   signals?: { audio: Record<string, number>; video: Record<string, { hueOk: boolean; moving: boolean }> };
   // For bots only: what this bot is currently publishing (default off; humans toggle it).
+  // Number of human attendees this client currently sees in the meeting (bots use it to know when to stop).
+  humans?: number;
   publishing?: { audio: boolean; video: boolean };
   net: { rttMs?: number; audioLossFraction?: number; downKbps?: number; upKbps?: number };
 }

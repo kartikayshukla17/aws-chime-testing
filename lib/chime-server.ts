@@ -2,6 +2,7 @@ import {
   ChimeSDKMeetingsClient,
   CreateMeetingCommand,
   CreateAttendeeCommand,
+  GetMeetingCommand,
   DeleteMeetingCommand,
   type Meeting,
 } from '@aws-sdk/client-chime-sdk-meetings';
@@ -32,6 +33,20 @@ async function createMeeting(room: string): Promise<Meeting> {
   return res.Meeting;
 }
 
+// True only if the room's meeting is still running in Chime (a meeting ends 5 min after the last person leaves).
+export async function meetingExists(room: string): Promise<boolean> {
+  const m = await getJSON<Meeting>(key(room));
+  if (!m) return false;
+  try {
+    await client.send(new GetMeetingCommand({ MeetingId: m.MeetingId! }));
+    return true;
+  } catch (e) {
+    if ((e as Error).name !== 'NotFoundException') throw e;
+    await del(key(room)); // ended: forget it so the next person starts a fresh one
+    return false;
+  }
+}
+
 export const peekMeeting = (room: string) => getJSON<Meeting>(key(room));
 
 export async function getOrCreateMeeting(room: string): Promise<Meeting> {
@@ -39,7 +54,8 @@ export async function getOrCreateMeeting(room: string): Promise<Meeting> {
 }
 
 export async function createAttendee(room: string, name: string, kind: AttendeeKind) {
-  const externalUserId = `${kind}-${name}`.replace(/[^\w@.\-#]/g, '_').slice(0, 64);
+  // Spaces are kept so display names like "Bold Fox" read properly; '#' is reserved for content-share ids.
+  const externalUserId = `${kind}-${name}`.replace(/[^\w@.\- ]/g, '_').slice(0, 64);
   const attempt = async (meeting: Meeting) =>
     client.send(new CreateAttendeeCommand({ MeetingId: meeting.MeetingId!, ExternalUserId: externalUserId }));
 

@@ -29,7 +29,7 @@ describe('chime-server', () => {
     send.mockResolvedValueOnce({ Attendee: { AttendeeId: 'a1' } });
     await createAttendee('r2', 'bot 1!', 'bot');
     const cmd = send.mock.calls[1][0] as { input: { ExternalUserId: string } };
-    expect(cmd.input.ExternalUserId).toBe('bot-bot_1_');
+    expect(cmd.input.ExternalUserId).toBe('bot-bot 1_');
   });
 
   it('recreates the meeting once if the cached one has ended', async () => {

@@ -443,7 +443,7 @@ export default function Room({ room }: { room: string }) {
     return (
       <main className="mx-auto max-w-md p-6 space-y-3">
         <h1 className="text-lg font-semibold">Sign in to join “{room}”</h1>
-        <p className="text-sm text-zinc-400">No password. We picked a name for you — edit it or just continue.</p>
+        <p className="text-sm text-zinc-400">No password. We picked a display name for you — edit it or just continue.</p>
         <input className="w-full rounded bg-zinc-800 p-2" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && name && login()} />
         {needCode && <input className="w-full rounded bg-zinc-800 p-2" placeholder="Invite code" value={code} onChange={(e) => setCode(e.target.value)} />}
         <button className="rounded bg-blue-600 px-4 py-2 disabled:opacity-40" disabled={!name} onClick={login}>Continue</button>

@@ -1,14 +1,16 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { chromium, type Browser, type BrowserContext } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { botKey } from './session';
 
 interface BotState {
   browser?: Browser;
   // room -> botName -> context
   rooms: Map<string, Map<string, BrowserContext>>;
+  pages: Map<string, Page>; // `${room}/${name}` -> page
 }
 const g = globalThis as unknown as { __chimeBots?: BotState };
-const state: BotState = (g.__chimeBots ??= { rooms: new Map() });
+const state: BotState = (g.__chimeBots ??= { rooms: new Map(), pages: new Map() });
 
 const assetsDir = path.join(process.cwd(), 'assets');
 const videoFile = path.join(assetsDir, 'bot.y4m');
@@ -49,8 +51,15 @@ export async function spawnBots(room: string, count: number, opts: { screenshare
     while (existing.has(`bot-${n}`)) n++;
     const name = `bot-${n}`;
     const ctx = await browser.newContext({ permissions: ['camera', 'microphone'] });
+    // Same passwordless login path as humans; the bot key marks the session as a bot.
+    const login = await ctx.request.post(`${base}/api/login`, {
+      data: { name, bot: true },
+      headers: { 'x-bot-key': botKey() },
+    });
+    if (!login.ok()) throw new Error(`bot login failed: ${login.status()}`);
     const page = await ctx.newPage();
-    const qs = new URLSearchParams({ bot: '1', name, ...(opts.screenshare ? { share: '1' } : {}) });
+    state.pages.set(`${room}/${name}`, page);
+    const qs = new URLSearchParams({ bot: '1', ...(opts.screenshare ? { share: '1' } : {}) });
     await page.goto(`${base}/room/${encodeURIComponent(room)}?${qs}`);
     existing.set(name, ctx);
     started.push(name);
@@ -64,5 +73,12 @@ export async function closeBots(room: string) {
   const n = ctxs.size;
   await Promise.all([...ctxs.values()].map((c) => c.close().catch(() => {})));
   state.rooms.delete(room);
+  for (const k of [...state.pages.keys()]) if (k.startsWith(`${room}/`)) state.pages.delete(k);
   return n;
+}
+
+export async function screenshotBot(room: string, name: string): Promise<Buffer | null> {
+  const page = state.pages.get(`${room}/${name}`);
+  if (!page || page.isClosed()) return null;
+  return page.screenshot({ type: 'jpeg', quality: 60 });
 }

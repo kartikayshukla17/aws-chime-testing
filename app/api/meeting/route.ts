@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { deleteMeeting, getOrCreateMeeting } from '@/lib/chime-server';
 import { closeBots } from '@/lib/bots';
+import { clearReports } from '@/lib/reports';
 
 export const runtime = 'nodejs';
 
@@ -18,6 +19,7 @@ export async function DELETE(req: Request) {
   const { room } = await req.json();
   if (!room) return NextResponse.json({ error: 'room required' }, { status: 400 });
   await closeBots(room);
+  clearReports(room);
   try {
     return NextResponse.json({ deleted: await deleteMeeting(room) });
   } catch (e) {

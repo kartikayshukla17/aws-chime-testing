@@ -3,18 +3,24 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import type { AudioVideoFacade, DefaultMeetingSession } from 'amazon-chime-sdk-js';
 import VideoTile from './VideoTile';
+import type { Report } from '@/lib/reports';
 
 interface Tile { tileId: number; attendeeId: string; content: boolean; local: boolean }
 interface Person { name: string; volume: number; muted: boolean }
 interface Dev { deviceId: string; label: string }
 
 const SPEAKING_THRESHOLD = 0.1;
+// ExternalUserId is `${kind}-${name}-${id}`; show just the name.
+const pretty = (x: string) => x.replace(/^(human|bot)-/, '').replace(/-[0-9a-f]{8}$/, '');
 
 export default function Room({ room }: { room: string }) {
   const sp = useSearchParams();
-  const isBot = sp.get('bot') === '1';
   const autoShare = sp.get('share') === '1';
-  const [name, setName] = useState(sp.get('name') || '');
+  const [name, setName] = useState('');
+  const [code, setCode] = useState('');
+  const [me, setMe] = useState<{ name: string; bot: boolean } | null | undefined>(undefined);
+  const [needCode, setNeedCode] = useState(false);
+  const isBot = sp.get('bot') === '1' || !!me?.bot;
   const [phase, setPhase] = useState<'lobby' | 'joining' | 'joined' | 'error'>('lobby');
   const [error, setError] = useState('');
   const [tiles, setTiles] = useState<Record<number, Tile>>({});
@@ -33,15 +39,19 @@ export default function Room({ room }: { room: string }) {
   const sessionRef = useRef<DefaultMeetingSession | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [av, setAv] = useState<AudioVideoFacade | null>(null);
+  const namesRef = useRef<Record<string, string>>({});
+  const heardRef = useRef<Record<string, number>>({});
+  const tileCountRef = useRef(0);
+  const meNameRef = useRef('');
 
-  const join = useCallback(async (displayName: string) => {
+  const join = useCallback(async () => {
     setPhase('joining');
     const t0 = Date.now();
     try {
       const res = await fetch('/api/attendee', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ room, name: displayName, kind: isBot ? 'bot' : 'human' }),
+        body: JSON.stringify({ room }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'attendee failed');
@@ -57,11 +67,47 @@ export default function Room({ room }: { room: string }) {
       sessionRef.current = session;
       const audioVideo = session.audioVideo;
       setMyId(data.attendee.AttendeeId);
+      meNameRef.current = data.displayName;
 
       audioVideo.addObserver({
         audioVideoDidStart: () => setJoinMs(Date.now() - t0),
         audioVideoDidStartConnecting: (reconnecting: boolean) => { if (reconnecting) setReconnects((n) => n + 1); },
         audioVideoDidStop: () => setPhase('lobby'),
+        metricsDidReceive: (rep) => {
+          const m = rep.getObservableMetrics();
+          const vm = rep.getObservableVideoMetrics();
+          const tilesOut: Report['tiles'] = [];
+          for (const [aid, streams] of Object.entries(vm)) {
+            const first = Object.values(streams)[0] as Record<string, number> | undefined;
+            if (!first) continue;
+            tilesOut.push({
+              from: namesRef.current[aid.split('#')[0]] || aid.slice(0, 6),
+              content: aid.includes('#'),
+              width: first.videoDownstreamFrameWidth,
+              height: first.videoDownstreamFrameHeight,
+              fps: first.videoDownstreamFramesDecodedPerSecond,
+              kbps: first.videoDownstreamBitrate, // raw SDK value
+              lossPct: first.videoDownstreamPacketLossPercent,
+              delayMs: first.videoDownstreamDelayMs,
+            });
+          }
+          const report: Report = {
+            observer: meNameRef.current,
+            isBot,
+            ts: Date.now(),
+            tilesVisible: tileCountRef.current,
+            tiles: tilesOut,
+            hearing: { ...heardRef.current },
+            net: {
+              rttMs: m.currentRoundTripTimeMs,
+              audioLossFraction: m.audioPacketsReceivedFractionLoss,
+              downKbps: m.availableIncomingBitrate,
+              upKbps: m.availableOutgoingBitrate,
+            },
+          };
+          heardRef.current = {};
+          fetch('/api/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room, report }) }).catch(() => {});
+        },
         videoTileDidUpdate: (ts) => {
           if (!ts.tileId || !ts.boundAttendeeId) return;
           setTiles((t) => ({
@@ -81,9 +127,13 @@ export default function Room({ room }: { room: string }) {
           if (!present) { const { [id]: _x, ...rest } = p; return rest; }
           if (id.includes('#')) return p; // content-share pseudo attendee
           audioVideo.realtimeSubscribeToVolumeIndicator(id, (_a, volume, mutedFlag) => {
+            const nm = namesRef.current[id];
+            if (nm && !mutedFlag) heardRef.current[nm] = Math.max(heardRef.current[nm] ?? 0, volume ?? 0);
             setPeople((q) => (q[id] ? { ...q, [id]: { ...q[id], volume: volume ?? 0, muted: !!mutedFlag } } : q));
           });
-          return { ...p, [id]: { name: externalUserId || id.slice(0, 6), volume: 0, muted: false } };
+          const nm = externalUserId ? pretty(externalUserId) : id.slice(0, 6);
+          namesRef.current[id] = nm;
+          return { ...p, [id]: { name: nm, volume: 0, muted: false } };
         });
       });
 
@@ -115,9 +165,25 @@ export default function Room({ room }: { room: string }) {
     }
   }, [room, isBot, autoShare]);
 
+  useEffect(() => { tileCountRef.current = Object.keys(tiles).length; }, [tiles]);
+
   useEffect(() => {
-    if (isBot && name && phase === 'lobby') join(name);
-  }, [isBot, name, phase, join]);
+    fetch('/api/me').then((r) => r.json()).then((d) => { setMe(d.user); setNeedCode(!!d.accessCodeRequired); }).catch(() => setMe(null));
+  }, []);
+
+  useEffect(() => {
+    // Bots arrive with a pre-made bot session cookie and join immediately.
+    if (isBot && me?.bot && phase === 'lobby') join();
+  }, [isBot, me, phase, join]);
+
+  const login = async () => {
+    setError('');
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, code }) });
+    const d = await r.json();
+    if (!r.ok) return setError(d.error || 'login failed');
+    setMe({ name: d.name, bot: false });
+  };
+  const logout = async () => { await fetch('/api/logout', { method: 'POST' }); setMe(null); };
 
   useEffect(() => () => { sessionRef.current?.audioVideo.stop(); }, []);
 
@@ -160,12 +226,27 @@ export default function Room({ room }: { room: string }) {
   const label = (t: Tile) => people[t.attendeeId.split('#')[0]]?.name || t.attendeeId.slice(0, 6);
   const speaking = (t: Tile) => (people[t.attendeeId.split('#')[0]]?.volume ?? 0) > SPEAKING_THRESHOLD;
 
+  if (me === undefined) return <main className="p-6 text-sm text-zinc-400">Loading…</main>;
+
+  if (!me) {
+    return (
+      <main className="mx-auto max-w-md p-6 space-y-3">
+        <h1 className="text-lg font-semibold">Sign in to join “{room}”</h1>
+        <p className="text-sm text-zinc-400">No password. Pick a display name.</p>
+        <input className="w-full rounded bg-zinc-800 p-2" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && name && login()} />
+        {needCode && <input className="w-full rounded bg-zinc-800 p-2" placeholder="Invite code" value={code} onChange={(e) => setCode(e.target.value)} />}
+        <button className="rounded bg-blue-600 px-4 py-2 disabled:opacity-40" disabled={!name} onClick={login}>Continue</button>
+        {error && <p className="text-red-400 text-sm">{error}</p>}
+      </main>
+    );
+  }
+
   if (phase === 'lobby' || phase === 'error') {
     return (
       <main className="mx-auto max-w-md p-6 space-y-3">
         <h1 className="text-lg font-semibold">Room: {room}</h1>
-        <input className="w-full rounded bg-zinc-800 p-2" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
-        <button className="rounded bg-blue-600 px-4 py-2 disabled:opacity-40" disabled={!name} onClick={() => join(name)}>Join</button>
+        <p className="text-sm text-zinc-400">Signed in as <b>{me.name}</b> · <button className="underline" onClick={logout}>switch</button></p>
+        <button className="rounded bg-blue-600 px-4 py-2" onClick={() => join()}>Join</button>
         {error && <p className="text-red-400 text-sm">{error}</p>}
       </main>
     );
@@ -176,6 +257,7 @@ export default function Room({ room }: { room: string }) {
       <audio ref={audioRef} className="hidden" />
       <header className="flex flex-wrap items-center gap-2 text-sm">
         <b>{room}</b>
+        <a className="underline text-blue-400" href={`/dashboard/${encodeURIComponent(room)}`} target="_blank">receiving dashboard</a>
         <span className="text-zinc-400">{phase === 'joining' ? 'joining…' : `${Object.keys(people).length} in room · ${tileList.length} tiles · join ${joinMs ?? '…'}ms · reconnects ${reconnects}`}</span>
       </header>
       {phase === 'joined' && av && (

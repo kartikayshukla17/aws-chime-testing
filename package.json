@@ -7,7 +7,6 @@
     "build": "next build",
     "start": "next start -p 3100",
     "assets": "bash scripts/make-assets.sh",
-    "bots": "tsx scripts/bots-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

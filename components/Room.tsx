@@ -44,6 +44,7 @@ export default function Room({ room }: { room: string }) {
   const [botCount, setBotCount] = useState(3);
   const [botsEnabled, setBotsEnabled] = useState(false);
   const [events, setEvents] = useState<LogEvent[]>([]);
+  const [notice, setNotice] = useState('');
   const sessionRef = useRef<DefaultMeetingSession | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [av, setAv] = useState<AudioVideoFacade | null>(null);
@@ -51,13 +52,26 @@ export default function Room({ room }: { room: string }) {
   const heardRef = useRef<Record<string, number>>({});
   const tileCountRef = useRef(0);
   const meNameRef = useRef('');
+  const myIdRef = useRef('');
   const lastSentRef = useRef(0);
   const signalsRef = useRef<NonNullable<Report['signals']>>({ audio: {}, video: {} });
   const prevStripRef = useRef<Record<string, VideoSample['strip']>>({});
   const botMediaRef = useRef<ReturnType<typeof makeBotMedia> | null>(null);
   const toneRef = useRef<ReturnType<typeof createToneListener> | null>(null);
 
+  // Clears everything tied to the current session so the user can rejoin cleanly.
+  const resetLocal = useCallback(() => {
+    botMediaRef.current?.stop(); botMediaRef.current = null;
+    toneRef.current?.close(); toneRef.current = null;
+    namesRef.current = {}; heardRef.current = {}; prevStripRef.current = {};
+    signalsRef.current = { audio: {}, video: {} };
+    lastSentRef.current = 0;
+    setTiles({}); setPeople({}); setEvents([]); setAv(null);
+    setMuted(false); setCamOn(true); setSharing(false); setBots([]);
+  }, []);
+
   const join = useCallback(async () => {
+    setNotice('');
     setPhase('joining');
     const t0 = Date.now();
     try {
@@ -80,12 +94,17 @@ export default function Room({ room }: { room: string }) {
       sessionRef.current = session;
       const audioVideo = session.audioVideo;
       setMyId(data.attendee.AttendeeId);
+      myIdRef.current = data.attendee.AttendeeId;
       meNameRef.current = data.displayName;
 
       audioVideo.addObserver({
         audioVideoDidStart: () => setJoinMs(Date.now() - t0),
         audioVideoDidStartConnecting: (reconnecting: boolean) => { if (reconnecting) setReconnects((n) => n + 1); },
-        audioVideoDidStop: () => setPhase('lobby'),
+        audioVideoDidStop: (status) => {
+          if (status.statusCode() === sdk.MeetingSessionStatusCode.MeetingEnded) setNotice('The meeting was ended for everyone.');
+          resetLocal();
+          setPhase('lobby');
+        },
         metricsDidReceive: (rep) => {
           if (Date.now() - lastSentRef.current < REPORT_EVERY_MS) return;
           lastSentRef.current = Date.now();
@@ -93,6 +112,7 @@ export default function Room({ room }: { room: string }) {
           const vm = rep.getObservableVideoMetrics();
           const tilesOut: Report['tiles'] = [];
           for (const [aid, streams] of Object.entries(vm)) {
+            if (aid === myIdRef.current) continue; // own upstream tile has no downstream stats
             const first = Object.values(streams)[0] as Record<string, number> | undefined;
             if (!first) continue;
             tilesOut.push({
@@ -192,7 +212,7 @@ export default function Room({ room }: { room: string }) {
       setError((e as Error).message);
       setPhase('error');
     }
-  }, [room, isBot, autoShare]);
+  }, [room, isBot, autoShare, resetLocal]);
 
   useEffect(() => { tileCountRef.current = Object.keys(tiles).length; }, [tiles]);
 
@@ -281,8 +301,18 @@ export default function Room({ room }: { room: string }) {
     await fetch('/api/bots', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room }) });
     refreshBots();
   };
+  const leave = () => {
+    if (!av) return;
+    if (sharing) av.stopContentShare();
+    av.stopLocalVideoTile();
+    av.stopVideoInput().catch(() => {});
+    av.stopAudioInput().catch(() => {});
+    av.stop(); // triggers audioVideoDidStop -> resetLocal
+  };
   const endMeeting = async () => {
-    await fetch('/api/meeting', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room }) });
+    if (!window.confirm('End the meeting for everyone in this room?')) return;
+    const r = await fetch('/api/meeting', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room }) });
+    if (!r.ok) setError((await r.json().catch(() => ({}))).error || 'could not end meeting');
   };
 
   const tileList = Object.values(tiles);
@@ -309,7 +339,8 @@ export default function Room({ room }: { room: string }) {
       <main className="mx-auto max-w-md p-6 space-y-3">
         <h1 className="text-lg font-semibold">Room: {room}</h1>
         <p className="text-sm text-zinc-400">Signed in as <b>{me.name}</b> · <button className="underline" onClick={logout}>switch</button></p>
-        <button className="rounded bg-blue-600 px-4 py-2" onClick={() => join()}>Join</button>
+        {notice && <p className="text-amber-400 text-sm">{notice}</p>}
+        <button className="rounded bg-blue-600 px-4 py-2" onClick={() => join()}>{notice ? 'Rejoin' : 'Join'}</button>
         {error && <p className="text-red-400 text-sm">{error}</p>}
       </main>
     );
@@ -337,7 +368,8 @@ export default function Room({ room }: { room: string }) {
             <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.startAudioInput(e.target.value)}>{mics.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
             <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.startVideoInput(e.target.value)}>{cams.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
             <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.chooseAudioOutput(e.target.value)}>{outs.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
-            <button className="rounded bg-red-700 px-3 py-1" onClick={() => av.stop()}>Leave</button>
+            <button className="rounded bg-red-700 px-3 py-1" onClick={leave}>Leave</button>
+            {!isBot && <button className="rounded bg-red-900 px-3 py-1" onClick={endMeeting}>End meeting for all</button>}
           </div>
           {!isBot && botsEnabled && (
             <div className="rounded border border-zinc-700 p-3 text-sm space-y-2">
@@ -347,7 +379,6 @@ export default function Room({ room }: { room: string }) {
                 <button className="rounded bg-emerald-700 px-3 py-1" onClick={() => addBots(false)}>Add bots</button>
                 <button className="rounded bg-emerald-900 px-3 py-1" onClick={() => addBots(true)}>Add bots (with screenshare)</button>
                 <button className="rounded bg-zinc-700 px-3 py-1" onClick={removeBots}>Remove bots</button>
-                <button className="rounded bg-red-900 px-3 py-1" onClick={endMeeting}>End meeting for all</button>
               </div>
             </div>
           )}

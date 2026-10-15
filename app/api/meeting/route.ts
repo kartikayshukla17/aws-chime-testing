@@ -2,10 +2,12 @@ import { NextResponse } from 'next/server';
 import { deleteMeeting, getOrCreateMeeting } from '@/lib/chime-server';
 import { closeBots } from '@/lib/bots';
 import { clearReports } from '@/lib/reports';
+import { getSession } from '@/lib/session';
 
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
+  if (!getSession()) return NextResponse.json({ error: 'not logged in' }, { status: 401 });
   const { room } = await req.json();
   if (!room) return NextResponse.json({ error: 'room required' }, { status: 400 });
   try {
@@ -16,6 +18,7 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  if (!getSession()) return NextResponse.json({ error: 'not logged in' }, { status: 401 });
   const { room } = await req.json();
   if (!room) return NextResponse.json({ error: 'room required' }, { status: 400 });
   await closeBots(room);

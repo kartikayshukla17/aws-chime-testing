@@ -11,7 +11,7 @@ export async function GET(req: Request) {
   if (disabled()) return off();
   const room = new URL(req.url).searchParams.get('room');
   if (!room) return NextResponse.json({ error: 'room required' }, { status: 400 });
-  return NextResponse.json({ bots: listBots(room) });
+  return NextResponse.json({ bots: listBots(room), max: Number(process.env.MAX_BOTS || 15) });
 }
 
 export async function POST(req: Request) {

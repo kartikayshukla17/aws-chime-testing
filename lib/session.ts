@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 
 export interface Session { id: string; name: string; bot: boolean }
 
@@ -25,8 +25,9 @@ export function decode(token: string | undefined): Session | null {
   try { return JSON.parse(Buffer.from(payload, 'base64url').toString()); } catch { return null; }
 }
 
+// A per-tab token (x-session header) wins over the shared browser cookie, so several testers can share one browser.
 export function getSession(): Session | null {
-  return decode(cookies().get(COOKIE)?.value);
+  return decode(headers().get('x-session') ?? undefined) ?? decode(cookies().get(COOKIE)?.value);
 }
 
 export const cookieOptions = {

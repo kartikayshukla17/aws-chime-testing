@@ -14,8 +14,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'invalid access code' }, { status: 401 });
   }
   const isBot = !!bot && req.headers.get('x-bot-key') === botKey();
-  const res = NextResponse.json({ name: clean, bot: isBot });
+  const token = encode({ id: randomBytes(4).toString('hex'), name: clean, bot: isBot });
+  const res = NextResponse.json({ name: clean, bot: isBot, token });
   const { name: cookieName, ...opts } = cookieOptions;
-  res.cookies.set(cookieName, encode({ id: randomBytes(4).toString('hex'), name: clean, bot: isBot }), opts);
+  res.cookies.set(cookieName, token, opts);
   return res;
 }

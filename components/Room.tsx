@@ -5,6 +5,7 @@ import type { AudioVideoFacade, DefaultMeetingSession } from 'amazon-chime-sdk-j
 import VideoTile from './VideoTile';
 import AvatarTile from './AvatarTile';
 import type { Report } from '@/lib/reports';
+import { authHeaders, getToken, getTokenName, setToken } from '@/lib/clientauth';
 import { botNumber, createToneListener, hueFor, makeBotMedia, sampleVideo, stripChanged, toneHz, type VideoSample } from '@/lib/botsignal';
 
 interface Tile { tileId: number; attendeeId: string; content: boolean; local: boolean }
@@ -47,6 +48,7 @@ export default function Room({ room }: { room: string }) {
   const [bots, setBots] = useState<string[]>([]);
   const [botCount, setBotCount] = useState(3);
   const [botsEnabled, setBotsEnabled] = useState(false);
+  const [botMax, setBotMax] = useState(15);
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [notice, setNotice] = useState('');
   const [botStates, setBotStates] = useState<Record<string, BotPub>>({});
@@ -85,7 +87,7 @@ export default function Room({ room }: { room: string }) {
     try {
       const res = await fetch('/api/attendee', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ room }),
       });
       const data = await res.json();
@@ -260,10 +262,23 @@ export default function Room({ room }: { room: string }) {
 
   useEffect(() => { tileCountRef.current = Object.keys(tiles).length; }, [tiles]);
 
-  useEffect(() => { setName((n) => n || randomName()); }, []);
+  const urlName = sp.get('name');
+  useEffect(() => { setName((n) => n || urlName || randomName()); }, [urlName]);
 
   useEffect(() => {
-    fetch('/api/me').then((r) => r.json()).then((d) => { setMe(d.user); setNeedCode(!!d.accessCodeRequired); }).catch(() => setMe(null));
+    (async () => {
+      try {
+        // ?name=Alice logs this tab in as Alice (per-tab token), so one browser can hold many testers.
+        if (urlName && !sp.get('bot') && (!getToken() || getTokenName() !== urlName)) {
+          const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: urlName, code: sp.get('code') || '' }) });
+          const d = await r.json();
+          if (r.ok) setToken(d.token, urlName); else setError(d.error || 'login failed');
+        }
+        const d = await (await fetch('/api/me', { headers: authHeaders() })).json();
+        setMe(d.user); setNeedCode(!!d.accessCodeRequired);
+      } catch { setMe(null); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -276,9 +291,10 @@ export default function Room({ room }: { room: string }) {
     const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, code }) });
     const d = await r.json();
     if (!r.ok) return setError(d.error || 'login failed');
+    setToken(d.token, d.name);
     setMe({ name: d.name, bot: false });
   };
-  const logout = async () => { await fetch('/api/logout', { method: 'POST' }); setMe(null); };
+  const logout = async () => { await fetch('/api/logout', { method: 'POST' }); setToken(null); setMe(null); };
 
   useEffect(() => () => { sessionRef.current?.audioVideo.stop(); botMediaRef.current?.stop(); toneRef.current?.close(); }, []);
 
@@ -335,7 +351,7 @@ export default function Room({ room }: { room: string }) {
   const refreshBots = useCallback(async () => {
     const r = await fetch(`/api/bots?room=${encodeURIComponent(room)}`);
     setBotsEnabled(r.ok);
-    if (r.ok) setBots((await r.json()).bots);
+    if (r.ok) { const d = await r.json(); setBots(d.bots); setBotMax(d.max); }
   }, [room]);
   useEffect(() => { if (phase === 'joined' && !isBot) refreshBots(); }, [phase, isBot, refreshBots]);
 
@@ -374,10 +390,19 @@ export default function Room({ room }: { room: string }) {
   };
   const endMeeting = async () => {
     if (!window.confirm('End the meeting for everyone in this room?')) return;
-    const r = await fetch('/api/meeting', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room }) });
+    const r = await fetch('/api/meeting', { method: 'DELETE', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ room }) });
     if (!r.ok) setError((await r.json().catch(() => ({}))).error || 'could not end meeting');
   };
 
+  const inviteLink = typeof window === 'undefined' ? '' : `${window.location.origin}/room/${encodeURIComponent(room)}${code ? `?code=${encodeURIComponent(code)}` : ''}`;
+  const [copied, setCopied] = useState(false);
+  const copy = async (text: string) => {
+    try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { window.prompt('Copy this link', text); }
+  };
+  const openTester = () => {
+    const qs = new URLSearchParams({ name: randomName(), ...(code ? { code } : {}) });
+    window.open(`/room/${encodeURIComponent(room)}?${qs}`, '_blank');
+  };
   const tileList = Object.values(tiles);
   const label = (t: Tile) => people[t.attendeeId.split('#')[0]]?.name || t.attendeeId.slice(0, 6);
   const speaking = (t: Tile) => (people[t.attendeeId.split('#')[0]]?.volume ?? 0) > SPEAKING_THRESHOLD;
@@ -415,6 +440,8 @@ export default function Room({ room }: { room: string }) {
       <header className="flex flex-wrap items-center gap-2 text-sm">
         <b>{room}</b>
         <a className="underline text-blue-400" href={`/dashboard/${encodeURIComponent(room)}`} target="_blank">receiving dashboard</a>
+        <button className="rounded bg-zinc-700 px-2 py-0.5 text-xs" title="Link for colleagues: same room, they pick their own name" onClick={() => copy(inviteLink)}>{copied ? 'Copied!' : 'Copy invite link'}</button>
+        <button className="rounded bg-zinc-700 px-2 py-0.5 text-xs" title="Opens this room in a new tab as another tester (own name), to test concurrent users from one browser" onClick={openTester}>+ Another tester tab</button>
         <span className="text-zinc-400">{phase === 'joining' ? 'joining…' : `${Object.keys(people).length} in room · ${tileList.length} tiles · join ${joinMs ?? '…'}ms · reconnects ${reconnects}`}</span>
       </header>
       {phase === 'joined' && av && (
@@ -447,9 +474,15 @@ export default function Room({ room }: { room: string }) {
           </div>
           {!isBot && botsEnabled && (
             <div className="rounded border border-zinc-700 p-3 text-sm space-y-2">
-              <div className="font-medium">Proxy users (bots) — {bots.length} running {bots.length ? `(${bots.join(', ')})` : ''}</div>
+              <div className="font-medium">
+                Proxy users (bots) — {bots.length} / {botMax} max {bots.length ? `(${bots.join(', ')})` : ''}
+                <span className="ml-2 text-xs font-normal text-zinc-400">
+                  {botMax} = cap on this machine (MAX_BOTS). Chime allows 250 people and 25 live videos per meeting.
+                  Videos on now: {tileList.filter((t) => !t.content).length} / 25.
+                </span>
+              </div>
               <div className="flex flex-wrap items-center gap-2">
-                <input type="number" min={1} max={15} className="w-16 rounded bg-zinc-800 p-1" value={botCount} onChange={(e) => setBotCount(Number(e.target.value))} />
+                <input type="number" min={1} max={botMax} className="w-16 rounded bg-zinc-800 p-1" value={botCount} onChange={(e) => setBotCount(Number(e.target.value))} />
                 <button className="rounded bg-emerald-700 px-3 py-1" onClick={() => addBots(false)}>Add bots</button>
                 <button className="rounded bg-emerald-900 px-3 py-1" onClick={() => addBots(true)}>Add bots (with screenshare)</button>
                 <button className="rounded bg-zinc-700 px-3 py-1" onClick={removeBots}>Remove bots</button>

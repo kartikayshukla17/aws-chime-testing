@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import type { AudioVideoFacade, DefaultMeetingSession } from 'amazon-chime-sdk-js';
 import VideoTile from './VideoTile';
+import AvatarTile from './AvatarTile';
 import type { Report } from '@/lib/reports';
 import { botNumber, createToneListener, hueFor, makeBotMedia, sampleVideo, stripChanged, toneHz, type VideoSample } from '@/lib/botsignal';
 
@@ -419,8 +420,19 @@ export default function Room({ room }: { room: string }) {
       {phase === 'joined' && av && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            {tileList.map((t) => (
-              <VideoTile key={t.tileId} tileId={t.tileId} label={t.local ? `${label(t)} (you)` : label(t)} name={label(t)} speaking={speaking(t)} content={t.content} audioVideo={av} />
+            {/* One tile per person: live video when they have it, otherwise their initial. */}
+            {Object.entries(people)
+              .sort((a, b) => (a[0] === myId ? -1 : b[0] === myId ? 1 : a[1].name.localeCompare(b[1].name, undefined, { numeric: true })))
+              .map(([id, p]) => {
+                const t = tileList.find((x) => !x.content && x.attendeeId.split('#')[0] === id);
+                const lbl = id === myId ? `${p.name} (you)` : p.name;
+                const spk = !p.muted && p.volume > SPEAKING_THRESHOLD;
+                return t
+                  ? <VideoTile key={`v-${t.tileId}`} tileId={t.tileId} label={lbl} name={p.name} speaking={spk} content={false} bot={botNumber(p.name) > 0} audioVideo={av} />
+                  : <AvatarTile key={`a-${id}`} name={p.name} label={lbl} speaking={spk} bot={botNumber(p.name) > 0} />;
+              })}
+            {tileList.filter((t) => t.content).map((t) => (
+              <VideoTile key={`c-${t.tileId}`} tileId={t.tileId} label={label(t)} name={label(t)} speaking={false} content audioVideo={av} />
             ))}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -461,7 +473,7 @@ export default function Room({ room }: { room: string }) {
               </div>
               <ul className="space-y-0.5">
                 {Object.entries(people).sort((a, b) => a[1].name.localeCompare(b[1].name, undefined, { numeric: true })).map(([id, p]) => {
-                  const hasVideo = tileList.some((t) => !t.content && t.attendeeId === id);
+                  const hasVideo = tileList.some((t) => !t.content && t.attendeeId.split('#')[0] === id);
                   return (
                     <li key={id} className="flex justify-between">
                       <span>{botNumber(p.name) ? '🤖 ' : ''}{p.name}{id === myId ? ' (you)' : ''}</span>

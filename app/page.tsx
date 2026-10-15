@@ -28,6 +28,7 @@ export default function Home() {
       >
         Open room
       </button>
+      <p className="text-sm"><a className="text-blue-400 underline" href="/bots">Active bots →</a></p>
       <p className="text-sm text-zinc-400">Different room names run as separate, concurrent meetings. In one browser, give each tab its own name (…/room/test?name=Alice) so each tab is a different person.</p>
     </main>
   );

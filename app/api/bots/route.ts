@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { closeBots, idleMinutes, listBots, spawnBots } from '@/lib/bots';
+import { closeBots, leaveGraceSeconds, listBots, spawnBots, startGraceMinutes } from '@/lib/bots';
 
 export const runtime = 'nodejs';
 
@@ -11,7 +11,7 @@ export async function GET(req: Request) {
   if (disabled()) return off();
   const room = new URL(req.url).searchParams.get('room');
   if (!room) return NextResponse.json({ error: 'room required' }, { status: 400 });
-  return NextResponse.json({ bots: listBots(room), max: Number(process.env.MAX_BOTS || 15), idleMinutes: idleMinutes() });
+  return NextResponse.json({ bots: listBots(room), max: Number(process.env.MAX_BOTS || 15), leaveGraceSeconds: leaveGraceSeconds(), startGraceMinutes: startGraceMinutes() });
 }
 
 export async function POST(req: Request) {

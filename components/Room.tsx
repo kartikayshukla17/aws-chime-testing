@@ -49,7 +49,8 @@ export default function Room({ room }: { room: string }) {
   const [botCount, setBotCount] = useState(3);
   const [botsEnabled, setBotsEnabled] = useState(false);
   const [botMax, setBotMax] = useState(15);
-  const [idleMin, setIdleMin] = useState(0);
+  const [leaveGrace, setLeaveGrace] = useState(0);
+  const [startGrace, setStartGrace] = useState(0);
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [notice, setNotice] = useState('');
   const [botStates, setBotStates] = useState<Record<string, BotPub>>({});
@@ -64,6 +65,7 @@ export default function Room({ room }: { room: string }) {
   const meNameRef = useRef('');
   const myIdRef = useRef('');
   const humanIdsRef = useRef<Set<string>>(new Set());
+  const botGuardRef = useRef<{ timer?: ReturnType<typeof setTimeout>; everHuman: boolean }>({ everHuman: false });
   const lastSentRef = useRef(0);
   const signalsRef = useRef<NonNullable<Report['signals']>>({ audio: {}, video: {} });
   const prevStripRef = useRef<Record<string, VideoSample['strip']>>({});
@@ -74,6 +76,7 @@ export default function Room({ room }: { room: string }) {
   const resetLocal = useCallback(() => {
     botMediaRef.current?.stop(); botMediaRef.current = null;
     toneRef.current?.close(); toneRef.current = null;
+    if (botGuardRef.current.timer) { clearTimeout(botGuardRef.current.timer); botGuardRef.current = { everHuman: false }; }
     namesRef.current = {}; humanIdsRef.current = new Set(); heardRef.current = {}; prevStripRef.current = {};
     signalsRef.current = { audio: {}, video: {} };
     lastSentRef.current = 0;
@@ -81,6 +84,26 @@ export default function Room({ room }: { room: string }) {
     setMuted(false); setCamOn(true); setSharing(false); setBots([]); setBotStates({}); setToneDb({});
     botSelfRef.current = { audio: false, video: false };
   }, []);
+
+  // Bots only: Chime tells us when attendees leave or drop (button, tab close, crash, network). When no human
+  // remains for the grace period, ask whoever runs the bots to stop them. The runner provides __botStop/__botCfg.
+  const evaluateBotIdle = useCallback(() => {
+    if (!isBot) return;
+    const w = window as unknown as { __botCfg?: { leaveGraceMs: number; startGraceMs: number }; __botStop?: () => void };
+    const g = botGuardRef.current;
+    if (humanIdsRef.current.size > 0) {
+      g.everHuman = true;
+      if (g.timer) { clearTimeout(g.timer); g.timer = undefined; }
+      return;
+    }
+    if (g.timer || !w.__botCfg) return;
+    const ms = g.everHuman ? w.__botCfg.leaveGraceMs : w.__botCfg.startGraceMs;
+    if (ms <= 0) return;
+    g.timer = setTimeout(() => {
+      g.timer = undefined;
+      if (humanIdsRef.current.size === 0) w.__botStop?.(); else g.everHuman = true;
+    }, ms);
+  }, [isBot]);
 
   const join = useCallback(async () => {
     setNotice('');
@@ -115,6 +138,7 @@ export default function Room({ room }: { room: string }) {
           if (isBot) {
             audioVideo.realtimeMuteLocalAudio(); // default off; a human turns it on per bot
             audioVideo.realtimeSendDataMessage(BOT_STATE, botSelfRef.current, 30000);
+            evaluateBotIdle(); // nobody here yet -> start the wait-for-a-human clock
           }
         },
         audioVideoDidStartConnecting: (reconnecting: boolean) => { if (reconnecting) setReconnects((n) => n + 1); },
@@ -150,7 +174,6 @@ export default function Room({ room }: { room: string }) {
             ts: Date.now(),
             tilesVisible: tileCountRef.current,
             tiles: tilesOut,
-            humans: humanIdsRef.current.size,
             publishing: isBot ? { ...botSelfRef.current } : undefined,
             hearing: { ...heardRef.current },
             signals: signalsRef.current,
@@ -210,6 +233,7 @@ export default function Room({ room }: { room: string }) {
           if (!gone) return;
           delete namesRef.current[id];
           humanIdsRef.current.delete(id);
+          evaluateBotIdle();
           audioVideo.realtimeUnsubscribeFromVolumeIndicator(id);
           setEvents((ev) => [...ev, { t: Date.now(), name: gone, joined: false }].slice(-30));
           setPeople((p) => { const { [id]: _x, ...rest } = p; return rest; });
@@ -219,6 +243,7 @@ export default function Room({ room }: { room: string }) {
         const nm = externalUserId ? pretty(externalUserId) : id.slice(0, 6);
         namesRef.current[id] = nm;
         if (externalUserId?.startsWith('human-')) humanIdsRef.current.add(id);
+        evaluateBotIdle();
         audioVideo.realtimeSubscribeToVolumeIndicator(id, (_a, volume, mutedFlag) => {
           const who = namesRef.current[id];
           if (who && !mutedFlag) heardRef.current[who] = Math.max(heardRef.current[who] ?? 0, volume ?? 0);
@@ -263,7 +288,7 @@ export default function Room({ room }: { room: string }) {
       setError((e as Error).message);
       setPhase('error');
     }
-  }, [room, isBot, autoShare, resetLocal]);
+  }, [room, isBot, autoShare, resetLocal, evaluateBotIdle]);
 
   useEffect(() => { tileCountRef.current = Object.keys(tiles).length; }, [tiles]);
 
@@ -356,7 +381,7 @@ export default function Room({ room }: { room: string }) {
   const refreshBots = useCallback(async () => {
     const r = await fetch(`/api/bots?room=${encodeURIComponent(room)}`);
     setBotsEnabled(r.ok);
-    if (r.ok) { const d = await r.json(); setBots(d.bots); setBotMax(d.max); setIdleMin(d.idleMinutes ?? 0); }
+    if (r.ok) { const d = await r.json(); setBots(d.bots); setBotMax(d.max); setLeaveGrace(d.leaveGraceSeconds ?? 0); setStartGrace(d.startGraceMinutes ?? 0); }
   }, [room]);
   useEffect(() => { if (phase === 'joined' && !isBot) refreshBots(); }, [phase, isBot, refreshBots]);
 
@@ -484,7 +509,7 @@ export default function Room({ room }: { room: string }) {
                 <span className="ml-2 text-xs font-normal text-zinc-400">
                   {botMax} = cap on this machine (MAX_BOTS). Chime allows 250 people and 25 live videos per meeting.
                   Videos on now: {tileList.filter((t) => !t.content).length} / 25.
-                  {idleMin > 0 ? ` Bots stop by themselves ${idleMin} min after the last person leaves.` : ''}
+                  {leaveGrace > 0 ? ` Bots stop by themselves ${leaveGrace}s after the last person leaves or closes their tab` : ''}{startGrace > 0 ? ` (or ${startGrace} min after starting if nobody joins).` : leaveGrace > 0 ? '.' : ''}
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">

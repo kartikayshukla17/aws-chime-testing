@@ -43,6 +43,12 @@ export async function hsetJSON(key: string, field: string, value: unknown, ttlSe
   mem.hashes.set(key, h);
 }
 
+export async function hgetAllEntries<T>(key: string): Promise<Record<string, T>> {
+  if (redis) return (await redis.hgetall<Record<string, T>>(key)) ?? {};
+  const h = mem.hashes.get(key);
+  return h && alive(h.exp) ? (Object.fromEntries(h.f) as Record<string, T>) : {};
+}
+
 export async function hgetAllJSON<T>(key: string): Promise<T[]> {
   if (redis) return Object.values((await redis.hgetall<Record<string, T>>(key)) ?? {});
   const h = mem.hashes.get(key);

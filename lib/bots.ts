@@ -3,12 +3,17 @@ import { botKey } from './botkey';
 
 interface BotState {
   browser?: Browser;
-  watch: Map<string, { timer: ReturnType<typeof setInterval>; lastHuman: number; base: string }>;
   // room -> botName -> context
   rooms: Map<string, Map<string, BrowserContext>>;
 }
 const g = globalThis as unknown as { __chimeBots?: BotState };
-const state: BotState = (g.__chimeBots ??= { rooms: new Map(), watch: new Map() });
+const state: BotState = (g.__chimeBots ??= { rooms: new Map() });
+
+// Bots stop themselves when Chime says no humans are left in their meeting (leave, tab close, crash or dropped
+// connection all look the same to Chime). Leave grace is short so a page refresh doesn't kill them; start grace is
+// how long they wait for the first person to arrive. A value of 0 disables that rule.
+export const leaveGraceSeconds = () => Number(process.env.BOT_LEAVE_GRACE_SECONDS ?? 30);
+export const startGraceMinutes = () => Number(process.env.BOT_IDLE_MINUTES ?? 5);
 
 async function getBrowser(): Promise<Browser> {
   if (state.browser?.isConnected()) return state.browser;
@@ -22,40 +27,12 @@ async function getBrowser(): Promise<Browser> {
   return state.browser;
 }
 
-// Minutes with no human in the meeting before that room's bots shut themselves down. 0 disables it.
-export const idleMinutes = () => Number(process.env.BOT_IDLE_MINUTES ?? 5);
-const CHECK_EVERY_MS = 10_000;
-const FRESH_MS = 35_000; // a bot report older than this is ignored
-
-// Asks the app (works for a local server and for a deployed one) what the bots see. Bots report how many humans
-// are present according to Chime itself, which doesn't depend on a person's tab being in the foreground.
-async function checkIdle(room: string) {
-  const w = state.watch.get(room);
-  const idleMs = idleMinutes() * 60_000;
-  if (!w || idleMs <= 0) return;
-  try {
-    const d = (await (await fetch(`${w.base}/api/report?room=${encodeURIComponent(room)}`, { cache: 'no-store' })).json()) as {
-      now: number; reports: { isBot: boolean; ts: number; humans?: number }[];
-    };
-    const fresh = d.reports.filter((r) => r.isBot && d.now - r.ts <= FRESH_MS && typeof r.humans === 'number');
-    if (fresh.length === 0) return; // bots still joining, or the app is unreachable: don't guess
-    if (Math.max(...fresh.map((r) => r.humans as number)) > 0) { w.lastHuman = Date.now(); return; }
-    if (Date.now() - w.lastHuman >= idleMs) {
-      console.log(`[bots] no humans in "${room}" for ${idleMinutes()} min, stopping its bots`);
-      await closeBots(room);
-    }
-  } catch { /* transient network error: try again next tick */ }
-}
-
-function watchRoom(room: string, base: string) {
-  if (state.watch.has(room) || idleMinutes() <= 0) return;
-  // The clock starts when the bots start, so people have the grace period to arrive.
-  const timer = setInterval(() => { void checkIdle(room); }, CHECK_EVERY_MS);
-  state.watch.set(room, { timer, lastHuman: Date.now(), base });
-}
-
 export function listBots(room: string): string[] {
   return [...(state.rooms.get(room)?.keys() ?? [])];
+}
+
+export function allBots(): Record<string, string[]> {
+  return Object.fromEntries([...state.rooms.entries()].filter(([, m]) => m.size > 0).map(([r, m]) => [r, [...m.keys()]]));
 }
 
 export async function spawnBots(
@@ -75,6 +52,17 @@ export async function spawnBots(
     while (existing.has(`bot-${n}`)) n++;
     const name = `bot-${n}`;
     const ctx = await browser.newContext();
+    // The bot page calls this when it sees no humans for the grace period; it works wherever the bots run
+    // (this server, or a runner on another machine pointed at a deployed app).
+    await ctx.exposeFunction('__botStop', () => {
+      setTimeout(() => {
+        console.log(`[bots] no humans left in "${room}", stopping its bots`);
+        void closeBots(room);
+      }, 0);
+    });
+    await ctx.addInitScript(
+      `window.__botCfg = ${JSON.stringify({ leaveGraceMs: leaveGraceSeconds() * 1000, startGraceMs: startGraceMinutes() * 60_000 })};`,
+    );
     // Same passwordless login path as humans; the bot key marks the session as a bot.
     const login = await ctx.request.post(`${base}/api/login`, {
       data: { name, bot: true },
@@ -86,19 +74,16 @@ export async function spawnBots(
     await page.goto(`${base}/room/${encodeURIComponent(room)}?${qs}`);
     existing.set(name, ctx);
     started.push(name);
-    watchRoom(room, base);
     n++;
   }
   return { started, total: existing.size, capped: allowed < count };
 }
 
 export async function closeBots(room: string) {
-  const w = state.watch.get(room);
-  if (w) { clearInterval(w.timer); state.watch.delete(room); }
   const ctxs = state.rooms.get(room);
   if (!ctxs) return 0;
   const n = ctxs.size;
-  await Promise.all([...ctxs.values()].map((c) => c.close().catch(() => {})));
   state.rooms.delete(room);
+  await Promise.all([...ctxs.values()].map((c) => c.close().catch(() => {})));
   return n;
 }

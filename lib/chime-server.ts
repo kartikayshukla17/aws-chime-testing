@@ -32,6 +32,8 @@ async function createMeeting(room: string): Promise<Meeting> {
   return res.Meeting;
 }
 
+export const peekMeeting = (room: string) => getJSON<Meeting>(key(room));
+
 export async function getOrCreateMeeting(room: string): Promise<Meeting> {
   return (await getJSON<Meeting>(key(room))) ?? createMeeting(room);
 }

@@ -4,11 +4,9 @@ import { cookies } from 'next/headers';
 export interface Session { id: string; name: string; bot: boolean }
 
 const COOKIE = 'ct_session';
-const g = globalThis as unknown as { __ctSecret?: string; __ctBotKey?: string };
+const g = globalThis as unknown as { __ctSecret?: string };
 // Dev fallback: random per process (sessions reset on restart). Set SESSION_SECRET to persist.
 const secret = () => process.env.SESSION_SECRET || (g.__ctSecret ??= randomBytes(32).toString('hex'));
-// Only server-side bots know this key, so a browser cannot claim to be a bot.
-export const botKey = () => (g.__ctBotKey ??= randomBytes(16).toString('hex'));
 
 const sign = (payload: string) => createHmac('sha256', secret()).update(payload).digest('base64url');
 

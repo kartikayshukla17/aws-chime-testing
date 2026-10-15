@@ -36,6 +36,7 @@ export default function Room({ room }: { room: string }) {
   const [reconnects, setReconnects] = useState(0);
   const [bots, setBots] = useState<string[]>([]);
   const [botCount, setBotCount] = useState(3);
+  const [botsEnabled, setBotsEnabled] = useState(false);
   const sessionRef = useRef<DefaultMeetingSession | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [av, setAv] = useState<AudioVideoFacade | null>(null);
@@ -189,6 +190,7 @@ export default function Room({ room }: { room: string }) {
 
   const refreshBots = useCallback(async () => {
     const r = await fetch(`/api/bots?room=${encodeURIComponent(room)}`);
+    setBotsEnabled(r.ok);
     if (r.ok) setBots((await r.json()).bots);
   }, [room]);
   useEffect(() => { if (phase === 'joined' && !isBot) refreshBots(); }, [phase, isBot, refreshBots]);
@@ -276,7 +278,7 @@ export default function Room({ room }: { room: string }) {
             <select className="rounded bg-zinc-800 p-1" onChange={(e) => av.chooseAudioOutput(e.target.value)}>{outs.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}</select>
             <button className="rounded bg-red-700 px-3 py-1" onClick={() => av.stop()}>Leave</button>
           </div>
-          {!isBot && (
+          {!isBot && botsEnabled && (
             <div className="rounded border border-zinc-700 p-3 text-sm space-y-2">
               <div className="font-medium">Proxy users (bots) — {bots.length} running {bots.length ? `(${bots.join(', ')})` : ''}</div>
               <div className="flex flex-wrap items-center gap-2">

@@ -1,9 +1,14 @@
 import { screenshotBot } from '@/lib/bots';
 
 export const runtime = 'nodejs';
+
+// Bots need Chromium, so they only run on a machine you control (set ENABLE_BOTS=1). Not on Vercel.
+const disabled = () => process.env.ENABLE_BOTS !== '1';
+const off = () => Response.json({ error: 'bots disabled on this server' }, { status: 501 });
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request) {
+  if (disabled()) return off();
   const u = new URL(req.url);
   const room = u.searchParams.get('room');
   const name = u.searchParams.get('name');

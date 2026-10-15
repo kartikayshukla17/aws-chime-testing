@@ -1,3 +1,5 @@
+import { del, hgetAllJSON, hsetJSON } from './store';
+
 export interface TileReport { from: string; content: boolean; width?: number; height?: number; fps?: number; kbps?: number; lossPct?: number; delayMs?: number }
 export interface Report {
   observer: string;
@@ -9,13 +11,9 @@ export interface Report {
   net: { rttMs?: number; audioLossFraction?: number; downKbps?: number; upKbps?: number };
 }
 
-const g = globalThis as unknown as { __ctReports?: Map<string, Map<string, Report>> };
-const store = (g.__ctReports ??= new Map());
+const key = (room: string) => `reports:${room}`;
+const TTL_SEC = 15 * 60;
 
-export function saveReport(room: string, r: Report) {
-  const m = store.get(room) ?? new Map<string, Report>();
-  store.set(room, m);
-  m.set(r.observer, r);
-}
-export const getReports = (room: string) => [...(store.get(room)?.values() ?? [])];
-export const clearReports = (room: string) => store.delete(room);
+export const saveReport = (room: string, r: Report) => hsetJSON(key(room), r.observer, r, TTL_SEC);
+export const getReports = (room: string) => hgetAllJSON<Report>(key(room));
+export const clearReports = (room: string) => del(key(room));

@@ -32,6 +32,16 @@ describe('chime-server', () => {
     expect(cmd.input.ExternalUserId).toBe('bot-bot_1_');
   });
 
+  it('recreates the meeting once if the cached one has ended', async () => {
+    send.mockResolvedValueOnce({ Meeting: { MeetingId: 'old' } }); // create
+    send.mockRejectedValueOnce(Object.assign(new Error('gone'), { name: 'NotFoundException' })); // attendee on old
+    send.mockResolvedValueOnce({ Meeting: { MeetingId: 'new' } }); // create again
+    send.mockResolvedValueOnce({ Attendee: { AttendeeId: 'a2' } }); // attendee on new
+    const r = await createAttendee('r3', 'x', 'human');
+    expect(r.meeting.MeetingId).toBe('new');
+    expect(r.attendee.AttendeeId).toBe('a2');
+  });
+
   it('deleteMeeting returns false for unknown rooms', async () => {
     expect(await deleteMeeting('nope')).toBe(false);
   });

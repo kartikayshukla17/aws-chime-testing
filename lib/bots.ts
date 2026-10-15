@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { botKey } from './session';
+import type { Browser, BrowserContext, Page } from 'playwright';
+import { botKey } from './botkey';
 
 interface BotState {
   browser?: Browser;
@@ -21,6 +21,8 @@ async function getBrowser(): Promise<Browser> {
   if (!fs.existsSync(videoFile) || !fs.existsSync(audioFile)) {
     throw new Error('Missing bot media. Run: npm run assets');
   }
+  // Loaded lazily so the deployed (Vercel) build never needs Chromium.
+  const { chromium } = await import('playwright');
   state.browser = await chromium.launch({
     headless: true,
     args: [
@@ -38,12 +40,12 @@ export function listBots(room: string): string[] {
   return [...(state.rooms.get(room)?.keys() ?? [])];
 }
 
-export async function spawnBots(room: string, count: number, opts: { screenshare?: boolean } = {}) {
+export async function spawnBots(room: string, count: number, opts: { screenshare?: boolean; baseUrl?: string } = {}) {
   const max = Number(process.env.MAX_BOTS || 10);
   const existing = state.rooms.get(room) ?? new Map<string, BrowserContext>();
   state.rooms.set(room, existing);
   const allowed = Math.max(0, Math.min(count, max - existing.size));
-  const base = (process.env.APP_URL || 'http://localhost:3100').replace(/\/$/, '');
+  const base = (opts.baseUrl || process.env.APP_URL || 'http://localhost:3100').replace(/\/$/, '');
   const browser = await getBrowser();
   const started: string[] = [];
   for (let i = 0; i < allowed; i++) {

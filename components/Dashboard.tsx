@@ -57,7 +57,7 @@ export default function Dashboard({ room }: { room: string }) {
               </div>
               {r.isBot && !stale && (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img alt={`${r.observer} view`} className="w-full rounded" src={`/api/bots/screenshot?room=${encodeURIComponent(room)}&name=${encodeURIComponent(r.observer)}&t=${tick}`} />
+                <img alt={`${r.observer} view`} className="w-full rounded" onError={(e) => { e.currentTarget.style.display = 'none'; }} src={`/api/bots/screenshot?room=${encodeURIComponent(room)}&name=${encodeURIComponent(r.observer)}&t=${tick}`} />
               )}
             </section>
           );

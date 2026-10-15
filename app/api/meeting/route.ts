@@ -19,7 +19,7 @@ export async function DELETE(req: Request) {
   const { room } = await req.json();
   if (!room) return NextResponse.json({ error: 'room required' }, { status: 400 });
   await closeBots(room);
-  clearReports(room);
+  await clearReports(room);
   try {
     return NextResponse.json({ deleted: await deleteMeeting(room) });
   } catch (e) {

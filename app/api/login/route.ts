@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { randomBytes } from 'node:crypto';
-import { botKey, cleanName, cookieOptions, encode } from '@/lib/session';
+import { cleanName, cookieOptions, encode } from '@/lib/session';
+import { botKey } from '@/lib/botkey';
 
 export const runtime = 'nodejs';
 

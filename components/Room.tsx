@@ -70,6 +70,7 @@ export default function Room({ room }: { room: string }) {
   const humanIdsRef = useRef<Set<string>>(new Set());
   const botGuardRef = useRef<{ timer?: ReturnType<typeof setTimeout>; everHuman: boolean }>({ everHuman: false });
   const lastSentRef = useRef(0);
+  const stopBaselineRef = useRef<number | null>(null);
   const signalsRef = useRef<NonNullable<Report['signals']>>({ audio: {}, video: {} });
   const prevStripRef = useRef<Record<string, VideoSample['strip']>>({});
   const botMediaRef = useRef<ReturnType<typeof makeBotMedia> | null>(null);
@@ -92,6 +93,14 @@ export default function Room({ room }: { room: string }) {
 
   // Bots only: Chime tells us when attendees leave or drop (button, tab close, crash, network). When no human
   // remains for the grace period, ask whoever runs the bots to stop them. The runner provides __botStop/__botCfg.
+  // Bots: remove our report so /bots stops listing us immediately, then ask the runner to close this room's bots.
+  const stopSelf = useCallback(() => {
+    const w = window as unknown as { __botStop?: () => void };
+    fetch('/api/report', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room, observer: meNameRef.current }), keepalive: true })
+      .catch(() => {})
+      .finally(() => w.__botStop?.());
+  }, [room]);
+
   const evaluateBotIdle = useCallback(() => {
     if (!isBot) return;
     const w = window as unknown as { __botCfg?: { leaveGraceMs: number; startGraceMs: number }; __botStop?: () => void };
@@ -106,9 +115,9 @@ export default function Room({ room }: { room: string }) {
     if (ms <= 0) return;
     g.timer = setTimeout(() => {
       g.timer = undefined;
-      if (humanIdsRef.current.size === 0) w.__botStop?.(); else g.everHuman = true;
+      if (humanIdsRef.current.size === 0) stopSelf(); else g.everHuman = true;
     }, ms);
-  }, [isBot]);
+  }, [isBot, stopSelf]);
 
   const join = useCallback(async () => {
     setNotice('');
@@ -190,7 +199,15 @@ export default function Room({ room }: { room: string }) {
             },
           };
           heardRef.current = {};
-          fetch('/api/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room, report }) }).catch(() => {});
+          fetch('/api/report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room, report }) })
+            .then((r) => r.json())
+            .then((d: { stopStamp?: number }) => {
+              if (!isBot || typeof d.stopStamp !== 'number') return;
+              if (stopBaselineRef.current === null) { stopBaselineRef.current = d.stopStamp; return; }
+              // A person in the meeting asked the bots to stop -> ask whoever runs us to close this room's bots.
+              if (d.stopStamp !== stopBaselineRef.current) stopSelf();
+            })
+            .catch(() => {});
         },
         videoTileDidUpdate: (ts) => {
           if (!ts.tileId || !ts.boundAttendeeId) return;
@@ -297,7 +314,7 @@ export default function Room({ room }: { room: string }) {
       setError((e as Error).message);
       setPhase('error');
     }
-  }, [room, isBot, autoShare, resetLocal, evaluateBotIdle]);
+  }, [room, isBot, autoShare, resetLocal, evaluateBotIdle, stopSelf]);
 
   useEffect(() => { tileCountRef.current = Object.keys(tiles).length; }, [tiles]);
 
@@ -453,6 +470,13 @@ export default function Room({ room }: { room: string }) {
     av.stopAudioInput().catch(() => {});
     av.stop(); // triggers audioVideoDidStop -> resetLocal
   };
+  const [stopMsg, setStopMsg] = useState('');
+  const stopAllBots = async () => {
+    setStopMsg('');
+    const r = await fetch('/api/bots/stop', { method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ room }) });
+    const d = await r.json().catch(() => ({}));
+    setStopMsg(r.ok ? d.note : d.error || 'could not stop bots');
+  };
   const endMeeting = async () => {
     if (!window.confirm('End the meeting for everyone in this room?')) return;
     const r = await fetch('/api/meeting', { method: 'DELETE', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ room }) });
@@ -576,6 +600,8 @@ export default function Room({ room }: { room: string }) {
                     <button className="rounded bg-zinc-700 px-2 py-0.5" onClick={() => commandBot('*', { audio: false })}>🔊 off</button>
                     <button className="rounded bg-zinc-700 px-2 py-0.5" onClick={() => commandBot('*', { video: true })}>📹 on</button>
                     <button className="rounded bg-zinc-700 px-2 py-0.5" onClick={() => commandBot('*', { video: false })}>📹 off</button>
+                    <button className="rounded bg-red-900 px-2 py-0.5" title="Make every bot leave the meeting (takes up to ~10 seconds)" onClick={stopAllBots}>stop bots</button>
+                    {stopMsg && <span className="text-zinc-400">{stopMsg}</span>}
                   </span>
                 )}
               </div>

@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
+import { authHeaders } from '@/lib/clientauth';
 
 interface Row { room: string; bots: string[]; staleBots: string[]; humans: string[]; meetingId: string | null; mediaRegion: string | null; startedByThisServer: string[] }
 interface Status { now: number; canControl: boolean; totals: { bots: number; meetings: number }; rooms: Row[] }
@@ -7,6 +8,7 @@ interface Status { now: number; canControl: boolean; totals: { bots: number; mee
 export default function BotsPage() {
   const [data, setData] = useState<Status | null>(null);
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
 
   const load = useCallback(async () => {
     if (document.hidden) return; // saves quota when nobody is looking
@@ -15,9 +17,13 @@ export default function BotsPage() {
   }, []);
   useEffect(() => { load(); const i = setInterval(load, 5000); return () => clearInterval(i); }, [load]);
 
+  // Works for bots running anywhere: the bots see the request in their next report and stop themselves.
+  // Only someone currently in that meeting is allowed to do this.
   const stop = async (room: string) => {
-    await fetch('/api/bots', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ room }) });
-    load();
+    const r = await fetch('/api/bots/stop', { method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ room }) });
+    const d = await r.json().catch(() => ({}));
+    setMsg((m) => ({ ...m, [room]: { ok: r.ok, text: r.ok ? d.note : d.error || 'could not stop bots' } }));
+    setTimeout(load, 12_000);
   };
 
   return (
@@ -37,10 +43,9 @@ export default function BotsPage() {
               <a className="text-blue-400 underline" href={`/room/${encodeURIComponent(r.room)}`}>room</a>
               <a className="text-blue-400 underline" href={`/dashboard/${encodeURIComponent(r.room)}`}>dashboard</a>
               <span className="text-zinc-400">{r.bots.length} bot{r.bots.length === 1 ? '' : 's'} · {r.humans.length} human{r.humans.length === 1 ? '' : 's'} reporting</span>
-              {data.canControl && r.startedByThisServer.length > 0 && (
-                <button className="ml-auto rounded bg-red-900 px-3 py-1" onClick={() => stop(r.room)}>Stop bots here</button>
-              )}
+              <button className="ml-auto rounded bg-red-900 px-3 py-1" title="Only people currently in this meeting can do this" onClick={() => stop(r.room)}>Stop bots</button>
             </div>
+            {msg[r.room] && <p className={`text-xs ${msg[r.room].ok ? 'text-emerald-400' : 'text-amber-400'}`}>{msg[r.room].text}</p>}
             <div className="flex flex-wrap gap-1">
               {r.bots.map((b) => <span key={b} className="rounded bg-emerald-900/60 px-2 py-0.5">🤖 {b}</span>)}
               {r.staleBots.map((b) => <span key={b} className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-500" title="started but not reported recently">🤖 {b} (not reporting)</span>)}

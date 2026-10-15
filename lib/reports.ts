@@ -1,4 +1,4 @@
-import { del, hgetAllEntries, hgetAllJSON, hsetJSON } from './store';
+import { del, hdel, hgetAllEntries, hgetAllJSON, hsetJSON } from './store';
 
 export interface TileReport { from: string; content: boolean; width?: number; height?: number; fps?: number; kbps?: number; lossPct?: number; delayMs?: number }
 export interface Report {
@@ -27,6 +27,7 @@ export async function saveReport(room: string, r: Report) {
     await hsetJSON('rooms', room, Date.now(), TTL_SEC);
   }
 }
+export const removeReport = (room: string, observer: string) => hdel(key(room), observer);
 export const listRooms = async () => Object.keys(await hgetAllEntries<number>('rooms'));
 export const getReports = (room: string) => hgetAllJSON<Report>(key(room));
 export const clearReports = (room: string) => del(key(room));
